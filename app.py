@@ -1,133 +1,93 @@
 import streamlit as st
 import pandas as pd
-from geopy.geocoders import Nominatim
-from geopy.distance import geodesic
 from datetime import datetime
 
-# Configuration page
-st.set_page_config(page_title="Tournées Livraison", page_icon="🚚", layout="wide")
+st.set_page_config(page_title="Tournées 🚚", layout="wide")
 
-# Titre
 st.title("🚚 Optimiseur de Tournées")
-st.markdown("**Application mobile pour chauffeurs poids-lourds**")
 
-# Initialisation
-if 'deliveries' not in st.session_state:
-    st.session_state.deliveries = []
+# Initialiser les données
+if 'livraisons' not in st.session_state:
+    st.session_state.livraisons = []
 
-geolocator = Nominatim(user_agent="delivery_optimizer_v1")
+# ===== FORMULAIRE AJOUT =====
+st.header("➕ Ajouter une livraison")
 
-# ===== SECTION 1 : AJOUT DE LIVRAISONS =====
-st.header("📍 Ajouter une livraison")
+with st.form("ajout_form", clear_on_submit=True):
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        nom = st.text_input("Client")
+        adresse = st.text_input("Adresse")
+    
+    with col2:
+        heure = st.time_input("Heure de livraison", value=datetime.strptime("09:00", "%H:%M").time())
+    
+    if st.form_submit_button("✅ Ajouter", type="primary"):
+        if nom and adresse:
+            st.session_state.livraisons.append({
+                'Client': nom,
+                'Adresse': adresse,
+                'Heure': heure.strftime("%H:%M")
+            })
+            st.success(f"✅ {nom} ajouté !")
+            st.rerun()
+        else:
+            st.error("⚠️ Remplissez tous les champs")
 
-col1, col2 = st.columns(2)
-
-with col1:
-    client_name = st.text_input("Nom du client", placeholder="Ex: Client A")
-    address = st.text_input("Adresse complète", placeholder="Ex: 5 Rue de Rivoli, 75001 Paris")
-
-with col2:
-    time_start = st.time_input("Heure début fenêtre", value=datetime.strptime("09:00", "%H:%M").time())
-    time_end = st.time_input("Heure fin fenêtre", value=datetime.strptime("11:00", "%H:%M").time())
-
-if st.button("➕ Ajouter cette livraison", type="primary"):
-    if not client_name or not address:
-        st.error("⚠️ Remplissez le nom et l'adresse")
-    else:
-        with st.spinner(f"Géocodage de {address}..."):
-            try:
-                location = geolocator.geocode(address, timeout=10)
-                if location:
-                    st.session_state.deliveries.append({
-                        'nom': client_name,
-                        'adresse': address,
-                        'lat': location.latitude,
-                        'lon': location.longitude,
-                        'debut': time_start.strftime("%H:%M"),
-                        'fin': time_end.strftime("%H:%M")
-                    })
-                    st.success(f"✅ {client_name} ajouté !")
-                else:
-                    st.error("❌ Adresse introuvable")
-            except Exception as e:
-                st.error(f"❌ Erreur : {e}")
-
-# ===== SECTION 2 : LISTE DES LIVRAISONS =====
+# ===== AFFICHAGE =====
 st.divider()
-st.header(f"📦 Livraisons enregistrées ({len(st.session_state.deliveries)})")
+st.header(f"📦 Livraisons ({len(st.session_state.livraisons)})")
 
-if st.session_state.deliveries:
-    df = pd.DataFrame(st.session_state.deliveries)
+if st.session_state.livraisons:
+    # Trier par heure
+    livraisons_triees = sorted(st.session_state.livraisons, key=lambda x: x['Heure'])
+    
+    # Afficher le tableau
+    df = pd.DataFrame(livraisons_triees)
     st.dataframe(df, use_container_width=True, hide_index=True)
     
-    col_btn1, col_btn2 = st.columns(2)
+    # Boutons d'action
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
+    
     with col_btn1:
-        if st.button("🗑️ Effacer tout", type="secondary"):
-            st.session_state.deliveries = []
+        if st.button("🗑️ Tout effacer"):
+            st.session_state.livraisons = []
             st.rerun()
     
-    # ===== SECTION 3 : OPTIMISATION =====
     with col_btn2:
-        if st.button("🚀 OPTIMISER LA TOURNÉE", type="primary"):
-            if len(st.session_state.deliveries) < 2:
-                st.error("❌ Il faut au moins 2 livraisons")
-            else:
-                st.divider()
-                st.header("✅ TOURNÉE OPTIMISÉE")
-                
-                # Tri par heure de début (optimisation simple)
-                sorted_deliveries = sorted(st.session_state.deliveries, key=lambda x: x['debut'])
-                
-                # Affichage de la tournée
-                total_distance = 0
-                for i, delivery in enumerate(sorted_deliveries, 1):
-                    if i == 1:
-                        st.markdown(f"### {i}. 🏁 {delivery['nom']}")
-                        st.caption(f"📍 {delivery['adresse']}")
-                        st.caption(f"🕐 Départ : {delivery['debut']}")
-                    else:
-                        # Calculer distance depuis le point précédent
-                        prev = sorted_deliveries[i-2]
-                        distance = geodesic(
-                            (prev['lat'], prev['lon']),
-                            (delivery['lat'], delivery['lon'])
-                        ).km
-                        total_distance += distance
-                        
-                        st.markdown(f"### {i}. 📦 {delivery['nom']}")
-                        st.caption(f"📍 {delivery['adresse']}")
-                        st.caption(f"🕐 Fenêtre : {delivery['debut']} - {delivery['fin']}")
-                        st.caption(f"🛣️ Distance depuis point précédent : **{distance:.2f} km**")
-                    
-                    st.divider()
-                
-                # Métriques
-                st.metric("📏 Distance totale estimée", f"{total_distance:.2f} km")
-                st.metric("⏱️ Temps de trajet estimé", f"{int(total_distance * 2)} minutes")
-                
-                # ===== SECTION 4 : EXPORT GOOGLE MAPS =====
-                st.header("🗺️ Navigation")
-                
-                # Créer l'URL Google Maps
-                waypoints = "/".join([f"{d['lat']},{d['lon']}" for d in sorted_deliveries])
-                google_maps_url = f"https://www.google.com/maps/dir/{waypoints}"
-                
-                st.markdown(f"### [🚗 OUVRIR DANS GOOGLE MAPS]({google_maps_url})")
-                st.caption("👆 Cliquez pour lancer la navigation GPS")
-                
-                # Afficher l'URL pour copie manuelle
-                with st.expander("📋 Copier le lien manuellement"):
-                    st.code(google_maps_url, language=None)
-                
-                # Détail de chaque étape
-                with st.expander("📍 Voir les coordonnées GPS"):
-                    for i, d in enumerate(sorted_deliveries, 1):
-                        st.text(f"{i}. {d['nom']}: {d['lat']}, {d['lon']}")
-
+        # Export CSV
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Télécharger CSV",
+            data=csv,
+            file_name="tournee.csv",
+            mime="text/csv"
+        )
+    
+    with col_btn3:
+        # Export Google Maps (sans géocodage)
+        adresses = " / ".join([l['Adresse'] for l in livraisons_triees])
+        google_url = f"https://www.google.com/maps/dir/{adresses.replace(' ', '+')}"
+        st.link_button("🗺️ Google Maps", google_url)
+    
+    # ===== TOURNÉE OPTIMISÉE =====
+    st.divider()
+    st.header("🚀 Tournée optimisée (par horaire)")
+    
+    for i, livraison in enumerate(livraisons_triees, 1):
+        st.markdown(f"### {i}. {livraison['Client']}")
+        st.caption(f"📍 {livraison['Adresse']}")
+        st.caption(f"🕐 {livraison['Heure']}")
+        if i < len(livraisons_triees):
+            st.markdown("↓")
+    
+    st.success(f"✅ {len(livraisons_triees)} livraisons planifiées")
+    
 else:
-    st.info("👆 Ajoutez votre première livraison ci-dessus")
+    st.info("👆 Ajoutez votre première livraison")
 
 # Footer
 st.divider()
-st.caption("💡 **Astuce** : Ajoutez d'abord votre dépôt (point de départ), puis vos clients")
-st.caption("🔄 Rafraîchissez la page pour recommencer")
+st.caption("💡 Conseil : Ajoutez d'abord votre point de départ")
+st.caption("🔄 Version simplifiée - Fonctionne sur tous les mobiles")
