@@ -1,3 +1,6 @@
 streamlit
 pandas
 googlemaps
+folium
+streamlit-folium
+plotly
