@@ -104,48 +104,155 @@ def geocoder_adresse(numero, rue, npa, ville):
                     return None, f"❌ Erreur : {error_msg[:100]}"
             continue
     
-    return None, f"❌ Adresse introuvable. Tentatives : {', '.join(tentatives)}"
-    
-    except Exception as e:
-        return None, f"❌ Erreur de géocodage : {str(e)}"
+    return None, f"❌ Adresse introuvable. Tentatives effectuées : {len(tentatives)}"
 
-# Fonction de calcul de distance
-def calculer_distance(origin, destination, mode_vehicule):
-    """
-    Calcule distance et temps entre 2 points
-    mode_vehicule: 'truck' ou 'car'
-    """
-    if not gmaps:
-        return None, None
+# Fonction pour calculer la matrice des distances
+def calculer_matrice_distances(points):
+    """Calcule les distances entre tous les points"""
+    if not gmaps or len(points) < 2:
+        return None
+    
+    coords = [f"{p['lat']},{p['lng']}" for p in points]
     
     try:
-        mode = "driving"  # Google Maps n'a pas de mode "truck"
-        
-        result = gmaps.distance_matrix(
-            origins=[(origin['lat'], origin['lng'])],
-            destinations=[(destination['lat'], destination['lng'])],
-            mode=mode,
-            departure_time=datetime.now()
+        matrix = gmaps.distance_matrix(
+            origins=coords,
+            destinations=coords,
+            mode="driving",
+            units="metric"
         )
-        
-        if result['rows'][0]['elements'][0]['status'] == 'OK':
-            distance_m = result['rows'][0]['elements'][0]['distance']['value']
-            duree_s = result['rows'][0]['elements'][0]['duration']['value']
-            
-            # Ajustement pour camion (+20% de temps)
-            if mode_vehicule == 'truck':
-                duree_s = int(duree_s * 1.2)
-            
-            return distance_m / 1000, duree_s / 60  # km, minutes
-        
-        return None, None
-    
+        return matrix
     except Exception as e:
-        st.error(f"Erreur calcul distance : {str(e)}")
-        return None, None
+        st.error(f"Erreur calcul distances : {str(e)}")
+        return None
 
-# Titre principal
-# Mode debug
+# Fonction d'optimisation simple
+def optimiser_tournee(depot, clients, vehicule):
+    """Optimise l'ordre des clients (algorithme du plus proche voisin)"""
+    if not clients:
+        return []
+    
+    tournee = []
+    clients_restants = clients.copy()
+    position_actuelle = depot
+    heure_actuelle = datetime.strptime("08:00", "%H:%M")
+    
+    # Coefficient véhicule
+    coef_vehicule = 1.2 if vehicule == "🚚 Camion" else 1.0
+    
+    while clients_restants:
+        # Trouver le client le plus proche
+        distances = []
+        for client in clients_restants:
+            if gmaps:
+                try:
+                    result = gmaps.distance_matrix(
+                        origins=[f"{position_actuelle['lat']},{position_actuelle['lng']}"],
+                        destinations=[f"{client['lat']},{client['lng']}"],
+                        mode="driving"
+                    )
+                    
+                    if result['rows'][0]['elements'][0]['status'] == 'OK':
+                        distance_m = result['rows'][0]['elements'][0]['distance']['value']
+                        duree_s = result['rows'][0]['elements'][0]['duration']['value']
+                        distances.append({
+                            'client': client,
+                            'distance': distance_m,
+                            'duree': duree_s
+                        })
+                except:
+                    pass
+        
+        if not distances:
+            # Fallback : distance à vol d'oiseau
+            for client in clients_restants:
+                dist = ((client['lat'] - position_actuelle['lat'])**2 + 
+                       (client['lng'] - position_actuelle['lng'])**2)**0.5 * 111000
+                distances.append({
+                    'client': client,
+                    'distance': dist,
+                    'duree': dist / 13.89  # ~50 km/h
+                })
+        
+        # Sélectionner le plus proche
+        plus_proche = min(distances, key=lambda x: x['distance'])
+        
+        # Calculer les horaires
+        duree_trajet = int(plus_proche['duree'] * coef_vehicule)
+        heure_arrivee = heure_actuelle + timedelta(seconds=duree_trajet)
+        
+        # Vérifier fenêtre horaire
+        if plus_proche['client'].get('heure_debut'):
+            heure_debut = datetime.strptime(plus_proche['client']['heure_debut'], "%H:%M")
+            if heure_arrivee < heure_debut:
+                temps_attente = (heure_debut - heure_arrivee).seconds // 60
+                heure_arrivee = heure_debut
+            else:
+                temps_attente = 0
+        else:
+            temps_attente = 0
+        
+        # Ajouter durée de livraison
+        duree_livraison = plus_proche['client'].get('duree_livraison', 15)
+        heure_depart = heure_arrivee + timedelta(minutes=duree_livraison)
+        
+        tournee.append({
+            'ordre': len(tournee) + 1,
+            'client': plus_proche['client'],
+            'distance_km': plus_proche['distance'] / 1000,
+            'duree_trajet_min': duree_trajet // 60,
+            'heure_arrivee': heure_arrivee.strftime("%H:%M"),
+            'temps_attente_min': temps_attente,
+            'heure_depart': heure_depart.strftime("%H:%M")
+        })
+        
+        # Mise à jour pour prochaine itération
+        clients_restants.remove(plus_proche['client'])
+        position_actuelle = plus_proche['client']
+        heure_actuelle = heure_depart
+    
+    # Retour au dépôt
+    if gmaps:
+        try:
+            result = gmaps.distance_matrix(
+                origins=[f"{position_actuelle['lat']},{position_actuelle['lng']}"],
+                destinations=[f"{depot['lat']},{depot['lng']}"],
+                mode="driving"
+            )
+            if result['rows'][0]['elements'][0]['status'] == 'OK':
+                distance_retour = result['rows'][0]['elements'][0]['distance']['value'] / 1000
+                duree_retour = int(result['rows'][0]['elements'][0]['duration']['value'] * coef_vehicule) // 60
+            else:
+                distance_retour = 0
+                duree_retour = 0
+        except:
+            distance_retour = 0
+            duree_retour = 0
+    else:
+        distance_retour = 0
+        duree_retour = 0
+    
+    heure_retour = heure_actuelle + timedelta(minutes=duree_retour)
+    
+    tournee.append({
+        'ordre': len(tournee) + 1,
+        'client': {'nom': 'Retour au dépôt', 'adresse_formatee': depot['adresse_formatee']},
+        'distance_km': distance_retour,
+        'duree_trajet_min': duree_retour,
+        'heure_arrivee': heure_retour.strftime("%H:%M"),
+        'temps_attente_min': 0,
+        'heure_depart': heure_retour.strftime("%H:%M")
+    })
+    
+    return tournee
+
+# ========================================
+# INTERFACE PRINCIPALE
+# ========================================
+
+st.title("🚚 Optimisation de Tournées - Suisse")
+
+# Mode debug (sidebar)
 with st.sidebar:
     st.markdown("---")
     debug_mode = st.checkbox("🔧 Mode Debug", value=False)
@@ -162,370 +269,316 @@ with st.sidebar:
                 del st.session_state[key]
             st.rerun()
 
-st.title("🚚 Optimisation de Tournées - Suisse")
 st.markdown("---")
 
-# ============================================================
+# ========================================
 # ÉTAPE 1 : CHOIX DU VÉHICULE
-# ============================================================
+# ========================================
+
 if st.session_state.etape == 1:
     st.header("🚗 ÉTAPE 1 : Choix du véhicule")
-    st.write("Sélectionnez le type de véhicule pour adapter les calculs de temps de trajet.")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("🚚 CAMION", use_container_width=True, type="primary"):
-            st.session_state.vehicule = 'truck'
+        if st.button("🚚 Camion\n(+20% temps)", use_container_width=True, type="primary"):
+            st.session_state.vehicule = "🚚 Camion"
             st.session_state.etape = 2
             st.rerun()
-        
-        st.caption("Temps de trajet +20%")
     
     with col2:
-        if st.button("🚗 VOITURE", use_container_width=True, type="primary"):
-            st.session_state.vehicule = 'car'
+        if st.button("🚗 Voiture\n(Temps standard)", use_container_width=True):
+            st.session_state.vehicule = "🚗 Voiture"
             st.session_state.etape = 2
             st.rerun()
-        
-        st.caption("Temps de trajet standard")
+    
+    st.info("💡 Le camion ajoute 20% au temps de trajet (vitesse réduite, manœuvres)")
 
-# ============================================================
+# ========================================
 # ÉTAPE 2 : DÉFINIR LE DÉPÔT
-# ============================================================
+# ========================================
+
 elif st.session_state.etape == 2:
     st.header("🏭 ÉTAPE 2 : Définir le dépôt")
-    st.write(f"**Véhicule sélectionné :** {'🚚 Camion' if st.session_state.vehicule == 'truck' else '🚗 Voiture'}")
+    st.caption(f"Véhicule sélectionné : **{st.session_state.vehicule}**")
     
-    st.markdown("### 📍 Adresse du dépôt")
-    st.caption("Remplissez les champs disponibles (pas besoin de tous les remplir si l'info suffit)")
+    st.subheader("📍 Adresse du dépôt")
+    st.caption("Remplissez au moins la ville ou le NPA. Les autres champs sont optionnels.")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        depot_numero = st.text_input("N° de rue", key="depot_numero")
-        depot_rue = st.text_input("Nom de rue", key="depot_rue")
+        numero_depot = st.text_input("N° rue", key="numero_depot", placeholder="Ex: 10")
+        npa_depot = st.text_input("NPA *", key="npa_depot", placeholder="Ex: 1003")
     
     with col2:
-        depot_npa = st.text_input("NPA (Code postal)", key="depot_npa")
-        depot_ville = st.text_input("Ville", key="depot_ville")
+        rue_depot = st.text_input("Nom de rue", key="rue_depot", placeholder="Ex: Avenue de la Gare")
+        ville_depot = st.text_input("Ville *", key="ville_depot", placeholder="Ex: Lausanne")
     
-    col_btn1, col_btn2 = st.columns([1, 1])
+    col_btn1, col_btn2 = st.columns([3, 1])
     
     with col_btn1:
-        if st.button("🔍 Valider le dépôt", type="primary", use_container_width=True):
-            result, error = geocoder_adresse(
-                depot_numero, 
-                depot_rue, 
-                depot_npa, 
-                depot_ville
-            )
-            
-            if result:
-                st.session_state.depot = {
-                    'numero': depot_numero,
-                    'rue': depot_rue,
-                    'npa': depot_npa,
-                    'ville': depot_ville,
-                    'lat': result['lat'],
-                    'lng': result['lng'],
-                    'adresse_formatee': result['adresse_formatee']
-                }
-                st.success(f"✅ Dépôt trouvé : {result['adresse_formatee']}")
-                st.session_state.etape = 3
-                st.rerun()
+        if st.button("✅ Valider le dépôt", type="primary", use_container_width=True):
+            if not ville_depot and not npa_depot:
+                st.error("❌ Veuillez renseigner au moins la ville ou le NPA")
             else:
-                st.error(error)
+                with st.spinner("🔍 Recherche de l'adresse..."):
+                    resultat, erreur = geocoder_adresse(numero_depot, rue_depot, npa_depot, ville_depot)
+                    
+                    if resultat:
+                        st.session_state.depot = resultat
+                        st.session_state.etape = 3
+                        st.success(f"✅ Dépôt enregistré : {resultat['adresse_formatee']}")
+                        st.rerun()
+                    else:
+                        st.error(erreur)
+                        st.info("💡 Vérifiez l'orthographe ou simplifiez (ex: juste le NPA + ville)")
     
     with col_btn2:
         if st.button("← Retour", use_container_width=True):
             st.session_state.etape = 1
             st.rerun()
 
-# ============================================================
-# ÉTAPE 3 : AJOUTER LES CLIENTS
-# ============================================================
+# ========================================
+# ÉTAPE 3 : AJOUTER DES CLIENTS
+# ========================================
+
 elif st.session_state.etape == 3:
-    st.header("👥 ÉTAPE 3 : Ajouter les clients")
+    st.header("👥 ÉTAPE 3 : Ajouter des clients")
+    st.caption(f"Véhicule : **{st.session_state.vehicule}** · Dépôt : **{st.session_state.depot['adresse_formatee']}**")
     
-    col_info1, col_info2 = st.columns(2)
-    with col_info1:
-        st.info(f"**Véhicule :** {'🚚 Camion' if st.session_state.vehicule == 'truck' else '🚗 Voiture'}")
-    with col_info2:
-        st.info(f"**Dépôt :** {st.session_state.depot['adresse_formatee']}")
-    
-    st.markdown("---")
-    
-    # Liste des clients déjà ajoutés
+    # Affichage de la liste des clients
     if st.session_state.clients:
         st.subheader(f"📋 Clients ajoutés ({len(st.session_state.clients)})")
         
         for idx, client in enumerate(st.session_state.clients):
-            with st.expander(f"**{client['nom']}** - {client['adresse_formatee']}", expanded=False):
-                col1, col2, col3 = st.columns([3, 2, 1])
-                
-                with col1:
-                    st.write(f"📍 {client['adresse_formatee']}")
-                    st.write(f"🕐 Fenêtre : **{client['heure_debut']} - {client['heure_fin']}**")
-                
-                with col2:
-                    st.write(f"⏱️ Durée livraison : **{client['duree_livraison']} min**")
-                
-                with col3:
-                    if st.button("🗑️", key=f"del_{idx}"):
-                        st.session_state.clients.pop(idx)
-                        st.rerun()
+            col1, col2, col3 = st.columns([3, 2, 1])
+            
+            with col1:
+                st.write(f"**{client['nom']}**")
+                st.caption(client['adresse_formatee'])
+            
+            with col2:
+                fenetre = ""
+                if client.get('heure_debut') and client.get('heure_fin'):
+                    fenetre = f"🕐 {client['heure_debut']} - {client['heure_fin']}"
+                st.caption(fenetre)
+            
+            with col3:
+                if st.button("🗑️", key=f"del_{idx}", use_container_width=True):
+                    st.session_state.clients.pop(idx)
+                    st.rerun()
         
         st.markdown("---")
     
-    # Formulaire d'ajout de client
+    # Formulaire d'ajout
     st.subheader("➕ Ajouter un nouveau client")
     
-    # Conserver les valeurs en cas d'erreur
-    if 'form_data' not in st.session_state:
-        st.session_state.form_data = {
-            'nom': '', 'numero': '', 'rue': '', 'npa': '', 'ville': '',
-            'heure_debut': datetime.strptime("09:00", "%H:%M").time(),
-            'heure_fin': datetime.strptime("17:00", "%H:%M").time(),
-            'duree': 15
-        }
-    
-    nom_client = st.text_input("👤 Nom du client", value=st.session_state.form_data['nom'])
+    nom_client = st.text_input("👤 Nom du client *", placeholder="Ex: Entreprise ABC")
     
     col1, col2 = st.columns(2)
+    
     with col1:
-        numero = st.text_input("N° de rue", value=st.session_state.form_data['numero'])
-        rue = st.text_input("Nom de rue", value=st.session_state.form_data['rue'])
+        numero_client = st.text_input("N° rue", key="numero_client", placeholder="Ex: 25")
+        npa_client = st.text_input("NPA *", key="npa_client", placeholder="Ex: 1003")
     
     with col2:
-        npa = st.text_input("NPA", value=st.session_state.form_data['npa'])
-        ville = st.text_input("Ville", value=st.session_state.form_data['ville'])
+        rue_client = st.text_input("Nom de rue", key="rue_client", placeholder="Ex: Rue du Commerce")
+        ville_client = st.text_input("Ville *", key="ville_client", placeholder="Ex: Lausanne")
+    
+    st.subheader("🕐 Horaires (optionnel)")
     
     col3, col4, col5 = st.columns(3)
+    
     with col3:
-        heure_debut = st.time_input("🕐 Début fenêtre", value=st.session_state.form_data['heure_debut'])
+        heure_debut = st.time_input("Heure début", value=None, step=900)
+    
     with col4:
-        heure_fin = st.time_input("🕐 Fin fenêtre", value=st.session_state.form_data['heure_fin'])
+        heure_fin = st.time_input("Heure fin", value=None, step=900)
+    
     with col5:
-        duree_livraison = st.number_input("⏱️ Durée (min)", min_value=5, max_value=120, value=st.session_state.form_data['duree'])
+        duree_livraison = st.number_input("Durée livraison (min)", min_value=5, max_value=120, value=15)
     
     col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 1])
     
     with col_btn1:
-        if st.button("➕ Ajouter ce client", type="primary", use_container_width=True):
-            # Sauvegarder les données du formulaire
-            st.session_state.form_data = {
-                'nom': nom_client,
-                'numero': numero,
-                'rue': rue,
-                'npa': npa,
-                'ville': ville,
-                'heure_debut': heure_debut,
-                'heure_fin': heure_fin,
-                'duree': duree_livraison
-            }
-            
+        if st.button("✅ Ajouter ce client", type="primary", use_container_width=True):
             if not nom_client:
                 st.error("❌ Le nom du client est obligatoire")
+            elif not ville_client and not npa_client:
+                st.error("❌ Veuillez renseigner au moins la ville ou le NPA")
             else:
-                result, error = geocoder_adresse(numero, rue, npa, ville)
-                
-                if result:
-                    client = {
-                        'nom': nom_client,
-                        'numero': numero,
-                        'rue': rue,
-                        'npa': npa,
-                        'ville': ville,
-                        'lat': result['lat'],
-                        'lng': result['lng'],
-                        'adresse_formatee': result['adresse_formatee'],
-                        'heure_debut': heure_debut.strftime("%H:%M"),
-                        'heure_fin': heure_fin.strftime("%H:%M"),
-                        'duree_livraison': duree_livraison
-                    }
+                with st.spinner("🔍 Recherche de l'adresse..."):
+                    resultat, erreur = geocoder_adresse(numero_client, rue_client, npa_client, ville_client)
                     
-                    st.session_state.clients.append(client)
-                    
-                    # Réinitialiser le formulaire UNIQUEMENT en cas de succès
-                    st.session_state.form_data = {
-                        'nom': '', 'numero': '', 'rue': '', 'npa': '', 'ville': '',
-                        'heure_debut': datetime.strptime("09:00", "%H:%M").time(),
-                        'heure_fin': datetime.strptime("17:00", "%H:%M").time(),
-                        'duree': 15
-                    }
-                    
-                    st.success(f"✅ {nom_client} ajouté !")
-                    st.rerun()
-                else:
-                    st.error(error)
-                    st.warning("⚠️ Les informations saisies sont conservées. Corrigez l'adresse et réessayez.")
+                    if resultat:
+                        nouveau_client = {
+                            'nom': nom_client,
+                            'lat': resultat['lat'],
+                            'lng': resultat['lng'],
+                            'adresse_formatee': resultat['adresse_formatee'],
+                            'duree_livraison': duree_livraison
+                        }
+                        
+                        if heure_debut and heure_fin:
+                            nouveau_client['heure_debut'] = heure_debut.strftime("%H:%M")
+                            nouveau_client['heure_fin'] = heure_fin.strftime("%H:%M")
+                        
+                        st.session_state.clients.append(nouveau_client)
+                        st.success(f"✅ Client ajouté : {resultat['adresse_formatee']}")
+                        st.rerun()
+                    else:
+                        st.error(erreur)
+                        st.info("💡 Les informations restent dans les champs. Corrigez et réessayez.")
     
     with col_btn2:
-        if st.session_state.clients:
-            if st.button("🚀 Optimiser la tournée", type="primary", use_container_width=True):
-                st.session_state.etape = 4
-                st.rerun()
+        if st.button("🚀 Optimiser la tournée", disabled=len(st.session_state.clients) == 0, use_container_width=True):
+            st.session_state.etape = 4
+            st.rerun()
     
     with col_btn3:
         if st.button("← Retour", use_container_width=True):
             st.session_state.etape = 2
             st.rerun()
 
-# ============================================================
-# ÉTAPE 4 : OPTIMISATION DE LA TOURNÉE
-# ============================================================
+# ========================================
+# ÉTAPE 4 : TOURNÉE OPTIMISÉE
+# ========================================
+
 elif st.session_state.etape == 4:
-    st.header("🚀 ÉTAPE 4 : Tournée optimisée")
+    st.header("🎯 ÉTAPE 4 : Tournée optimisée")
     
-    col_info1, col_info2, col_info3 = st.columns(3)
-    with col_info1:
-        st.info(f"**Véhicule :** {'🚚 Camion' if st.session_state.vehicule == 'truck' else '🚗 Voiture'}")
-    with col_info2:
-        st.info(f"**Dépôt :** {st.session_state.depot['ville']}")
-    with col_info3:
-        st.info(f"**Clients :** {len(st.session_state.clients)}")
+    # Optimisation
+    if st.session_state.tournee_optimisee is None:
+        with st.spinner("⏳ Optimisation en cours..."):
+            st.session_state.tournee_optimisee = optimiser_tournee(
+                st.session_state.depot,
+                st.session_state.clients,
+                st.session_state.vehicule
+            )
+    
+    tournee = st.session_state.tournee_optimisee
+    
+    # Résumé
+    distance_totale = sum(e['distance_km'] for e in tournee)
+    duree_totale = sum(e['duree_trajet_min'] for e in tournee[:-1])  # Sans retour
+    nb_clients = len(tournee) - 1
+    
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("📍 Clients", nb_clients)
+    col2.metric("🚗 Distance totale", f"{distance_totale:.1f} km")
+    col3.metric("⏱️ Temps de trajet", f"{duree_totale} min")
+    col4.metric("🕐 Fin estimée", tournee[-1]['heure_arrivee'])
     
     st.markdown("---")
-    
-    # Calcul de la tournée optimisée
-    with st.spinner("🔄 Optimisation en cours..."):
-        # Algorithme du plus proche voisin
-        points_restants = st.session_state.clients.copy()
-        tournee = []
-        position_actuelle = st.session_state.depot
-        
-        while points_restants:
-            distances = []
-            for client in points_restants:
-                dist, temps = calculer_distance(position_actuelle, client, st.session_state.vehicule)
-                if dist is not None:
-                    distances.append((client, dist, temps))
-            
-            if not distances:
-                break
-            
-            # Trier par distance
-            distances.sort(key=lambda x: x[1])
-            prochain_client, distance, temps = distances[0]
-            
-            tournee.append({
-                'client': prochain_client,
-                'distance_km': round(distance, 1),
-                'temps_trajet_min': round(temps, 0)
-            })
-            
-            points_restants.remove(prochain_client)
-            position_actuelle = prochain_client
-        
-        # Retour au dépôt
-        dist_retour, temps_retour = calculer_distance(position_actuelle, st.session_state.depot, st.session_state.vehicule)
-        
-        st.session_state.tournee_optimisee = tournee
-    
-    # Affichage de la tournée
-    st.subheader("📋 Ordre de livraison optimisé")
-    
-    distance_totale = 0
-    temps_total = 0
     
     # Tableau de la tournée
-    st.markdown("### 🏭 Départ du dépôt")
-    st.write(f"**{st.session_state.depot['adresse_formatee']}**")
+    st.subheader("📋 Feuille de route")
     
-    for idx, etape in enumerate(tournee, 1):
-        client = etape['client']
-        distance = etape['distance_km']
-        temps = etape['temps_trajet_min']
-        
-        distance_totale += distance
-        temps_total += temps + client['duree_livraison']
-        
-        st.markdown(f"### ↓ {distance} km · {int(temps)} min")
-        
+    for etape in tournee:
         with st.container():
-            col1, col2 = st.columns([3, 1])
+            col1, col2, col3, col4 = st.columns([1, 3, 2, 2])
+            
             with col1:
-                st.markdown(f"### 📍 **{idx}. {client['nom']}**")
-                st.write(f"**{client['adresse_formatee']}**")
-                st.write(f"🕐 Fenêtre : {client['heure_debut']} - {client['heure_fin']} · ⏱️ Livraison : {client['duree_livraison']} min")
+                st.write(f"**#{etape['ordre']}**")
+            
             with col2:
-                st.metric("Distance", f"{distance} km")
-                st.metric("Trajet", f"{int(temps)} min")
-    
-    if dist_retour:
-        distance_totale += dist_retour
-        temps_total += temps_retour
+                st.write(f"**{etape['client']['nom']}**")
+                st.caption(etape['client'].get('adresse_formatee', ''))
+            
+            with col3:
+                st.write(f"🚗 {etape['distance_km']:.1f} km · ⏱️ {etape['duree_trajet_min']} min")
+            
+            with col4:
+                st.write(f"🕐 Arrivée : **{etape['heure_arrivee']}**")
+                if etape.get('temps_attente_min', 0) > 0:
+                    st.caption(f"⏸️ Attente : {etape['temps_attente_min']} min")
+                if etape.get('heure_depart'):
+                    st.caption(f"🚀 Départ : {etape['heure_depart']}")
         
-        st.markdown(f"### ↓ {round(dist_retour, 1)} km · {int(temps_retour)} min")
+        st.markdown("---")
     
-    st.markdown("### 🏭 Retour au dépôt")
-    st.write(f"**{st.session_state.depot['adresse_formatee']}**")
-    
-    st.markdown("---")
-    
-    # Statistiques
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("🚗 Distance totale", f"{round(distance_totale, 1)} km")
-    with col2:
-        st.metric("⏱️ Temps total", f"{int(temps_total)} min ({temps_total/60:.1f}h)")
-    with col3:
-        st.metric("📦 Livraisons", len(tournee))
-    
-    st.markdown("---")
-    
-    # Carte
+    # Carte interactive
     st.subheader("🗺️ Carte de la tournée")
     
-    m = folium.Map(location=[st.session_state.depot['lat'], st.session_state.depot['lng']], zoom_start=10)
+    # Créer la carte
+    carte = folium.Map(
+        location=[st.session_state.depot['lat'], st.session_state.depot['lng']],
+        zoom_start=12
+    )
     
     # Marqueur dépôt
     folium.Marker(
-        location=[st.session_state.depot['lat'], st.session_state.depot['lng']],
+        [st.session_state.depot['lat'], st.session_state.depot['lng']],
         popup="🏭 DÉPÔT",
-        tooltip="Départ",
-        icon=folium.Icon(color='green', icon='home', prefix='glyphicon')
-    ).add_to(m)
+        icon=folium.Icon(color='red', icon='home')
+    ).add_to(carte)
     
     # Marqueurs clients
-    for idx, etape in enumerate(tournee, 1):
+    for idx, etape in enumerate(tournee[:-1]):  # Sans le retour
         client = etape['client']
         folium.Marker(
-            location=[client['lat'], client['lng']],
-            popup=f"<b>{idx}. {client['nom']}</b><br>{client['adresse_formatee']}",
-            tooltip=f"{idx}. {client['nom']}",
-            icon=folium.Icon(color='red', icon='info-sign', prefix='glyphicon')
-        ).add_to(m)
+            [client['lat'], client['lng']],
+            popup=f"#{etape['ordre']} - {client['nom']}<br>{etape['heure_arrivee']}",
+            icon=folium.Icon(color='blue', icon='info-sign', prefix='glyphicon')
+        ).add_to(carte)
+        
+        # Numéro sur la carte
+        folium.Marker(
+            [client['lat'], client['lng']],
+            icon=folium.DivIcon(html=f'<div style="font-size: 16pt; color: white; background-color: blue; border-radius: 50%; width: 30px; height: 30px; text-align: center; line-height: 30px; font-weight: bold;">{etape["ordre"]}</div>')
+        ).add_to(carte)
     
-    # Tracer la route
-    coords = [[st.session_state.depot['lat'], st.session_state.depot['lng']]]
-    for etape in tournee:
-        coords.append([etape['client']['lat'], etape['client']['lng']])
-    coords.append([st.session_state.depot['lat'], st.session_state.depot['lng']])
+    st_folium(carte, width=700, height=500)
     
-    folium.PolyLine(coords, color='blue', weight=3, opacity=0.7).add_to(m)
+    # Graphique Timeline
+    st.subheader("📊 Timeline de la tournée")
     
-    st_folium(m, width=700, height=500)
+    fig = go.Figure()
     
-    st.markdown("---")
+    for etape in tournee[:-1]:
+        heure_arr = datetime.strptime(etape['heure_arrivee'], "%H:%M")
+        heure_dep = datetime.strptime(etape['heure_depart'], "%H:%M")
+        
+        fig.add_trace(go.Bar(
+            x=[etape['client']['nom']],
+            y=[(heure_dep - heure_arr).seconds / 60],
+            name=etape['client']['nom'],
+            text=f"{etape['heure_arrivee']} - {etape['heure_depart']}",
+            textposition='auto'
+        ))
     
-    # Boutons d'action
+    fig.update_layout(
+        title="Durée par livraison (minutes)",
+        xaxis_title="Clients",
+        yaxis_title="Minutes",
+        showlegend=False,
+        height=400
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Export
+    st.subheader("📥 Export")
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        # Export CSV
-        df_export = pd.DataFrame([{
-            'Ordre': idx,
-            'Client': etape['client']['nom'],
-            'Adresse': etape['client']['adresse_formatee'],
-            'Distance (km)': etape['distance_km'],
-            'Temps trajet (min)': int(etape['temps_trajet_min']),
-            'Durée livraison (min)': etape['client']['duree_livraison'],
-            'Fenêtre horaire': f"{etape['client']['heure_debut']} - {etape['client']['heure_fin']}"
-        } for idx, etape in enumerate(tournee, 1)])
+        # CSV
+        df = pd.DataFrame([
+            {
+                'Ordre': e['ordre'],
+                'Client': e['client']['nom'],
+                'Adresse': e['client'].get('adresse_formatee', ''),
+                'Distance (km)': f"{e['distance_km']:.1f}",
+                'Durée trajet (min)': e['duree_trajet_min'],
+                'Heure arrivée': e['heure_arrivee'],
+                'Heure départ': e.get('heure_depart', '')
+            } for e in tournee
+        ])
         
-        csv = df_export.to_csv(index=False).encode('utf-8')
+        csv = df.to_csv(index=False).encode('utf-8')
+        
         st.download_button(
             label="📥 Télécharger CSV",
             data=csv,
@@ -537,7 +590,7 @@ elif st.session_state.etape == 4:
     with col2:
         # Lien Google Maps
         waypoints = [f"{st.session_state.depot['lat']},{st.session_state.depot['lng']}"]
-        for etape in tournee:
+        for etape in tournee[:-1]:
             waypoints.append(f"{etape['client']['lat']},{etape['client']['lng']}")
         waypoints.append(f"{st.session_state.depot['lat']},{st.session_state.depot['lng']}")
         
@@ -545,7 +598,7 @@ elif st.session_state.etape == 4:
         st.link_button("🗺️ Ouvrir dans Google Maps", gmaps_url, use_container_width=True)
     
     with col3:
-        if st.button("🔄 Nouvelle tournée", use_container_width=True):
+        if st.button("🔄 Nouvelle tournée", use_container_width=True, type="primary"):
             st.session_state.etape = 1
             st.session_state.clients = []
             st.session_state.depot = None
@@ -556,6 +609,7 @@ elif st.session_state.etape == 4:
     col_back1, col_back2 = st.columns([1, 5])
     with col_back1:
         if st.button("← Modifier clients", use_container_width=True):
+            st.session_state.tournee_optimisee = None
             st.session_state.etape = 3
             st.rerun()
 
