@@ -62,7 +62,7 @@ def get_optimized_order(clients, mode):
         return [clients.index(c) for c in ordered]
 
 # --- UI ---
-gmaps = googlemaps.Client(key=st.secrets["GMAPS_API_KEY"])
+gmaps = googlemaps.Client(key=st.secrets["google"]["api_key"])
 
 # ÉTAPE 1 : DÉPÔT
 if st.session_state.step == 1:
