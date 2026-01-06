@@ -1,6 +1,7 @@
-streamlit
-pandas
-googlemaps
-folium
-streamlit-folium
-plotly
+streamlit==1.31.0
+pandas==2.1.4
+googlemaps==4.10.0
+folium==0.15.1
+streamlit-folium==0.16.0
+plotly==5.18.0
+openpyxl==3.1.2
