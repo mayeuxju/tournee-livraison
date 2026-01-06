@@ -305,20 +305,56 @@ elif st.session_state.etape == 2:
     st.subheader("📍 Adresse du dépôt")
     st.caption("Remplissez au moins la ville ou le NPA. Les autres champs sont optionnels.")
     
+    # Initialiser les valeurs persistantes
+    if 'form_numero_depot' not in st.session_state:
+        st.session_state.form_numero_depot = ""
+    if 'form_rue_depot' not in st.session_state:
+        st.session_state.form_rue_depot = ""
+    if 'form_npa_depot' not in st.session_state:
+        st.session_state.form_npa_depot = ""
+    if 'form_ville_depot' not in st.session_state:
+        st.session_state.form_ville_depot = ""
+    
     col1, col2 = st.columns(2)
     
     with col1:
-        numero_depot = st.text_input("N° rue", key="numero_depot", placeholder="Ex: 10")
-        npa_depot = st.text_input("NPA *", key="npa_depot", placeholder="Ex: 1003")
+        numero_depot = st.text_input(
+            "N° rue", 
+            value=st.session_state.form_numero_depot,
+            key="input_numero_depot", 
+            placeholder="Ex: 10"
+        )
+        npa_depot = st.text_input(
+            "NPA *", 
+            value=st.session_state.form_npa_depot,
+            key="input_npa_depot", 
+            placeholder="Ex: 1003"
+        )
     
     with col2:
-        rue_depot = st.text_input("Nom de rue", key="rue_depot", placeholder="Ex: Avenue de la Gare")
-        ville_depot = st.text_input("Ville *", key="ville_depot", placeholder="Ex: Lausanne")
+        rue_depot = st.text_input(
+            "Nom de rue", 
+            value=st.session_state.form_rue_depot,
+            key="input_rue_depot", 
+            placeholder="Ex: Avenue de la Gare"
+        )
+        ville_depot = st.text_input(
+            "Ville *", 
+            value=st.session_state.form_ville_depot,
+            key="input_ville_depot", 
+            placeholder="Ex: Lausanne"
+        )
     
     col_btn1, col_btn2 = st.columns([3, 1])
     
     with col_btn1:
         if st.button("✅ Valider le dépôt", type="primary", use_container_width=True):
+            # Sauvegarder les valeurs
+            st.session_state.form_numero_depot = numero_depot
+            st.session_state.form_rue_depot = rue_depot
+            st.session_state.form_npa_depot = npa_depot
+            st.session_state.form_ville_depot = ville_depot
+            
             if not ville_depot and not npa_depot:
                 st.error("❌ Veuillez renseigner au moins la ville ou le NPA")
             else:
@@ -328,6 +364,11 @@ elif st.session_state.etape == 2:
                     if resultat:
                         st.session_state.depot = resultat
                         st.session_state.etape = 3
+                        # Réinitialiser les champs après succès
+                        st.session_state.form_numero_depot = ""
+                        st.session_state.form_rue_depot = ""
+                        st.session_state.form_npa_depot = ""
+                        st.session_state.form_ville_depot = ""
                         st.success(f"✅ Dépôt enregistré : {resultat['adresse_formatee']}")
                         st.rerun()
                     else:
@@ -338,6 +379,8 @@ elif st.session_state.etape == 2:
         if st.button("← Retour", use_container_width=True):
             st.session_state.etape = 1
             st.rerun()
+    
+    st.info("💡 Astuce : Commencez simple (ex: 1003 Lausanne) puis affinez si nécessaire")
 
 # ========================================
 # ÉTAPE 3 : AJOUTER DES CLIENTS
@@ -374,35 +417,79 @@ elif st.session_state.etape == 3:
     # Formulaire d'ajout
     st.subheader("➕ Ajouter un nouveau client")
     
-    nom_client = st.text_input("👤 Nom du client *", placeholder="Ex: Entreprise ABC")
+    # Initialiser les valeurs persistantes
+    if 'form_nom_client' not in st.session_state:
+        st.session_state.form_nom_client = ""
+    if 'form_numero_client' not in st.session_state:
+        st.session_state.form_numero_client = ""
+    if 'form_rue_client' not in st.session_state:
+        st.session_state.form_rue_client = ""
+    if 'form_npa_client' not in st.session_state:
+        st.session_state.form_npa_client = ""
+    if 'form_ville_client' not in st.session_state:
+        st.session_state.form_ville_client = ""
+    
+    nom_client = st.text_input(
+        "👤 Nom du client *", 
+        value=st.session_state.form_nom_client,
+        key="input_nom_client",
+        placeholder="Ex: Entreprise ABC"
+    )
     
     col1, col2 = st.columns(2)
     
     with col1:
-        numero_client = st.text_input("N° rue", key="numero_client", placeholder="Ex: 25")
-        npa_client = st.text_input("NPA *", key="npa_client", placeholder="Ex: 1003")
+        numero_client = st.text_input(
+            "N° rue", 
+            value=st.session_state.form_numero_client,
+            key="input_numero_client", 
+            placeholder="Ex: 25"
+        )
+        npa_client = st.text_input(
+            "NPA *", 
+            value=st.session_state.form_npa_client,
+            key="input_npa_client", 
+            placeholder="Ex: 1003"
+        )
     
     with col2:
-        rue_client = st.text_input("Nom de rue", key="rue_client", placeholder="Ex: Rue du Commerce")
-        ville_client = st.text_input("Ville *", key="ville_client", placeholder="Ex: Lausanne")
+        rue_client = st.text_input(
+            "Nom de rue", 
+            value=st.session_state.form_rue_client,
+            key="input_rue_client", 
+            placeholder="Ex: Rue du Commerce"
+        )
+        ville_client = st.text_input(
+            "Ville *", 
+            value=st.session_state.form_ville_client,
+            key="input_ville_client", 
+            placeholder="Ex: Lausanne"
+        )
     
     st.subheader("🕐 Horaires (optionnel)")
     
     col3, col4, col5 = st.columns(3)
     
     with col3:
-        heure_debut = st.time_input("Heure début", value=None, step=900)
+        heure_debut = st.time_input("Heure début", value=None, step=900, key="input_heure_debut")
     
     with col4:
-        heure_fin = st.time_input("Heure fin", value=None, step=900)
+        heure_fin = st.time_input("Heure fin", value=None, step=900, key="input_heure_fin")
     
     with col5:
-        duree_livraison = st.number_input("Durée livraison (min)", min_value=5, max_value=120, value=15)
+        duree_livraison = st.number_input("Durée livraison (min)", min_value=5, max_value=120, value=15, key="input_duree")
     
     col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 1])
     
     with col_btn1:
         if st.button("✅ Ajouter ce client", type="primary", use_container_width=True):
+            # Sauvegarder les valeurs
+            st.session_state.form_nom_client = nom_client
+            st.session_state.form_numero_client = numero_client
+            st.session_state.form_rue_client = rue_client
+            st.session_state.form_npa_client = npa_client
+            st.session_state.form_ville_client = ville_client
+            
             if not nom_client:
                 st.error("❌ Le nom du client est obligatoire")
             elif not ville_client and not npa_client:
@@ -425,21 +512,19 @@ elif st.session_state.etape == 3:
                             nouveau_client['heure_fin'] = heure_fin.strftime("%H:%M")
                         
                         st.session_state.clients.append(nouveau_client)
+                        
+                        # Réinitialiser les champs après succès
+                        st.session_state.form_nom_client = ""
+                        st.session_state.form_numero_client = ""
+                        st.session_state.form_rue_client = ""
+                        st.session_state.form_npa_client = ""
+                        st.session_state.form_ville_client = ""
+                        
                         st.success(f"✅ Client ajouté : {resultat['adresse_formatee']}")
                         st.rerun()
                     else:
                         st.error(erreur)
                         st.info("💡 Les informations restent dans les champs. Corrigez et réessayez.")
-    
-    with col_btn2:
-        if st.button("🚀 Optimiser la tournée", disabled=len(st.session_state.clients) == 0, use_container_width=True):
-            st.session_state.etape = 4
-            st.rerun()
-    
-    with col_btn3:
-        if st.button("← Retour", use_container_width=True):
-            st.session_state.etape = 2
-            st.rerun()
 
 # ========================================
 # ÉTAPE 4 : TOURNÉE OPTIMISÉE
