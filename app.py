@@ -8,15 +8,17 @@ import time as time_module
 st.set_page_config(page_title="Tournées 🚚", layout="wide")
 
 st.title("🚚 Optimiseur de Tournées Intelligent")
-st.markdown("**Détection de conflits + Temps de latence + Format HH:MM**")
+st.markdown("**Modification en temps réel + Ajout dynamique**")
 
 # Initialiser
 if 'livraisons' not in st.session_state:
     st.session_state.livraisons = []
 if 'depot' not in st.session_state:
     st.session_state.depot = None
+if 'editing_index' not in st.session_state:
+    st.session_state.editing_index = None
 
-geolocator = Nominatim(user_agent="delivery_optimizer_v4")
+geolocator = Nominatim(user_agent="delivery_optimizer_v5")
 
 # Fonction pour convertir minutes en HH:MM
 def minutes_to_hhmm(minutes):
@@ -34,12 +36,6 @@ def geocode_address(address):
         pass
     return None
 
-# Fonction pour vérifier si une heure est dans un créneau
-def is_in_time_slot(heure, debut, fin):
-    if not debut or not fin:
-        return True
-    return debut <= heure <= fin
-
 # Fonction pour calculer le temps entre deux heures
 def time_diff_minutes(time1, time2):
     dt1 = datetime.combine(datetime.today(), time1)
@@ -47,12 +43,12 @@ def time_diff_minutes(time1, time2):
     return int((dt2 - dt1).total_seconds() / 60)
 
 # Fonction d'optimisation avancée avec détection de conflits
-def optimize_route_with_conflicts(depot_coords, deliveries, heure_depart="08:00"):
+def optimize_route_with_conflicts(depot_coords, deliveries, heure_depart):
     if not deliveries or not depot_coords:
         return [], []
     
     # Convertir heure de départ
-    current_time = datetime.strptime(heure_depart, "%H:%M")
+    current_time = datetime.combine(datetime.today(), heure_depart)
     current_pos = depot_coords
     
     # Séparer les livraisons avec/sans contraintes horaires
@@ -74,7 +70,8 @@ def optimize_route_with_conflicts(depot_coords, deliveries, heure_depart="08:00"
         for delivery in remaining_with_slots:
             distance = geodesic(current_pos, delivery['coords']).km
             travel_time = int((distance / 50) * 60)  # Vitesse 50 km/h
-            arrival_time = (current_time + timedelta(minutes=travel_time)).time()
+            arrival_time_dt = current_time + timedelta(minutes=travel_time)
+            arrival_time = arrival_time_dt.time()
             
             # Vérifier si on peut arriver dans le créneau
             debut = delivery['creneau_debut']
@@ -95,9 +92,6 @@ def optimize_route_with_conflicts(depot_coords, deliveries, heure_depart="08:00"
                 if wait_time > 120:  # Plus de 2h d'attente
                     conflict_info = f"⚠️ CONFLIT : Arrivée à {arrival_time.strftime('%H:%M')}, créneau commence à {debut.strftime('%H:%M')} (attente: {minutes_to_hhmm(wait_time)})"
                     has_conflict = True
-                else:
-                    # Attendre
-                    arrival_time = debut
             
             if not has_conflict or not best_delivery:
                 if distance < best_distance:
@@ -169,10 +163,13 @@ st.header("🏭 Point de départ")
 col_depot1, col_depot2, col_depot3 = st.columns([3, 2, 1])
 
 with col_depot1:
-    depot_address = st.text_input("Adresse du dépôt", placeholder="Ex: 10 Rue de Paris, 75001 Paris")
+    depot_address = st.text_input("Adresse du dépôt", 
+                                  value=st.session_state.depot['adresse'] if st.session_state.depot else "",
+                                  placeholder="Ex: 10 Rue de Paris, 75001 Paris")
 
 with col_depot2:
-    heure_depart = st.time_input("Heure de départ", value=datetime.strptime("08:00", "%H:%M").time())
+    default_time = datetime.strptime(st.session_state.depot['heure_depart'], "%H:%M").time() if st.session_state.depot else datetime.strptime("08:00", "%H:%M").time()
+    heure_depart = st.time_input("⏰ Heure de départ du dépôt", value=default_time)
 
 with col_depot3:
     if st.button("📍 Valider", type="primary"):
@@ -186,57 +183,103 @@ with col_depot3:
                         'heure_depart': heure_depart.strftime("%H:%M")
                     }
                     st.success(f"✅ Dépôt : {depot_address}")
+                    # Réoptimiser si déjà des livraisons
+                    if 'route_optimized' in st.session_state:
+                        del st.session_state.route_optimized
                     st.rerun()
                 else:
                     st.error("❌ Adresse introuvable")
 
 if st.session_state.depot:
-    st.info(f"📍 **Dépôt** : {st.session_state.depot['adresse']} | 🕐 Départ : {st.session_state.depot['heure_depart']}")
+    st.info(f"📍 **Dépôt** : {st.session_state.depot['adresse']} | 🕐 **Départ** : {st.session_state.depot['heure_depart']}")
 
 st.divider()
 
-# ===== SECTION 2 : AJOUT LIVRAISONS =====
-st.header("📦 Ajouter une livraison")
+# ===== SECTION 2 : AJOUT/MODIFICATION LIVRAISONS =====
+st.header("📦 Gérer les livraisons")
 
-with st.form("ajout_form", clear_on_submit=True):
+# Formulaire d'ajout/modification
+if st.session_state.editing_index is not None:
+    st.subheader("✏️ Modification en cours")
+    delivery_to_edit = st.session_state.livraisons[st.session_state.editing_index]
+else:
+    st.subheader("➕ Ajouter une nouvelle livraison")
+    delivery_to_edit = None
+
+with st.form("livraison_form", clear_on_submit=True):
     col1, col2 = st.columns(2)
     
     with col1:
-        nom = st.text_input("Client", placeholder="Ex: Client A")
-        adresse = st.text_input("Adresse complète", placeholder="Ex: 5 Rue Victor Hugo, 69002 Lyon")
+        nom = st.text_input("Client", 
+                           value=delivery_to_edit['Client'] if delivery_to_edit else "",
+                           placeholder="Ex: Client A")
+        adresse = st.text_input("Adresse complète", 
+                               value=delivery_to_edit['Adresse'] if delivery_to_edit else "",
+                               placeholder="Ex: 5 Rue Victor Hugo, 69002 Lyon")
     
     with col2:
         st.markdown("**Créneau horaire (optionnel)**")
         col_time1, col_time2 = st.columns(2)
         with col_time1:
-            creneau_debut = st.time_input("De", value=None, key="debut", help="Laissez vide si pas de contrainte")
+            default_debut = delivery_to_edit['creneau_debut'] if delivery_to_edit and delivery_to_edit.get('creneau_debut') else None
+            creneau_debut = st.time_input("De", value=default_debut, key="debut", help="Laissez vide si pas de contrainte")
         with col_time2:
-            creneau_fin = st.time_input("À", value=None, key="fin", help="Laissez vide si pas de contrainte")
+            default_fin = delivery_to_edit['creneau_fin'] if delivery_to_edit and delivery_to_edit.get('creneau_fin') else None
+            creneau_fin = st.time_input("À", value=default_fin, key="fin", help="Laissez vide si pas de contrainte")
         
-        duree_manutention = st.number_input("Temps manutention (min)", min_value=0, value=0, 
+        default_manut = delivery_to_edit['duree_manutention'] or 0 if delivery_to_edit else 0
+        duree_manutention = st.number_input("Temps manutention (min)", min_value=0, value=default_manut,
                                            help="Laissez à 0 pour 10 min par défaut")
     
-    if st.form_submit_button("➕ Ajouter la livraison", type="primary", use_container_width=True):
-        if nom and adresse:
-            with st.spinner("🔍 Géolocalisation..."):
-                time_module.sleep(0.5)
-                coords = geocode_address(adresse)
-                
-                if coords:
-                    st.session_state.livraisons.append({
-                        'Client': nom,
-                        'Adresse': adresse,
-                        'creneau_debut': creneau_debut,
-                        'creneau_fin': creneau_fin,
-                        'duree_manutention': duree_manutention if duree_manutention > 0 else None,
-                        'coords': coords
-                    })
-                    st.success(f"✅ {nom} ajouté")
-                    st.rerun()
-                else:
-                    st.error(f"❌ Adresse introuvable : {adresse}")
-        else:
-            st.error("⚠️ Remplissez au moins le nom et l'adresse")
+    col_btn1, col_btn2 = st.columns(2)
+    
+    with col_btn1:
+        submit_label = "💾 Enregistrer les modifications" if delivery_to_edit else "➕ Ajouter la livraison"
+        if st.form_submit_button(submit_label, type="primary", use_container_width=True):
+            if nom and adresse:
+                with st.spinner("🔍 Géolocalisation..."):
+                    time_module.sleep(0.5)
+                    
+                    # Si modification et adresse inchangée, garder les coordonnées
+                    if delivery_to_edit and adresse == delivery_to_edit['Adresse']:
+                        coords = delivery_to_edit['coords']
+                    else:
+                        coords = geocode_address(adresse)
+                    
+                    if coords:
+                        new_delivery = {
+                            'Client': nom,
+                            'Adresse': adresse,
+                            'creneau_debut': creneau_debut,
+                            'creneau_fin': creneau_fin,
+                            'duree_manutention': duree_manutention if duree_manutention > 0 else None,
+                            'coords': coords
+                        }
+                        
+                        if st.session_state.editing_index is not None:
+                            # Modification
+                            st.session_state.livraisons[st.session_state.editing_index] = new_delivery
+                            st.session_state.editing_index = None
+                            st.success(f"✅ {nom} modifié")
+                        else:
+                            # Ajout
+                            st.session_state.livraisons.append(new_delivery)
+                            st.success(f"✅ {nom} ajouté")
+                        
+                        # Réoptimiser si nécessaire
+                        if 'route_optimized' in st.session_state:
+                            del st.session_state.route_optimized
+                        
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Adresse introuvable : {adresse}")
+            else:
+                st.error("⚠️ Remplissez au moins le nom et l'adresse")
+    
+    with col_btn2:
+        if delivery_to_edit and st.form_submit_button("❌ Annuler la modification", use_container_width=True):
+            st.session_state.editing_index = None
+            st.rerun()
 
 st.divider()
 
@@ -245,7 +288,7 @@ st.header(f"🗺️ Tournée ({len(st.session_state.livraisons)} livraisons)")
 
 if st.session_state.livraisons:
     
-    col_btn1, col_btn2 = st.columns(2)
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
     
     with col_btn1:
         if st.button("🚀 OPTIMISER LA TOURNÉE", type="primary", use_container_width=True):
@@ -253,10 +296,11 @@ if st.session_state.livraisons:
                 st.error("❌ Définissez d'abord le dépôt !")
             else:
                 with st.spinner("⏳ Optimisation en cours..."):
+                    heure_depart_obj = datetime.strptime(st.session_state.depot['heure_depart'], "%H:%M").time()
                     route, conflicts = optimize_route_with_conflicts(
                         st.session_state.depot['coords'],
                         st.session_state.livraisons,
-                        st.session_state.depot['heure_depart']
+                        heure_depart_obj
                     )
                     st.session_state.route_optimized = route
                     st.session_state.conflicts = conflicts
@@ -264,9 +308,18 @@ if st.session_state.livraisons:
                     st.rerun()
     
     with col_btn2:
+        if st.button("🔄 Réinitialiser l'optimisation", use_container_width=True):
+            if 'route_optimized' in st.session_state:
+                del st.session_state.route_optimized
+            if 'conflicts' in st.session_state:
+                del st.session_state.conflicts
+            st.rerun()
+    
+    with col_btn3:
         if st.button("🗑️ Tout effacer", use_container_width=True):
             st.session_state.livraisons = []
             st.session_state.depot = None
+            st.session_state.editing_index = None
             if 'route_optimized' in st.session_state:
                 del st.session_state.route_optimized
             if 'conflicts' in st.session_state:
@@ -352,7 +405,8 @@ if st.session_state.livraisons:
             st.metric("⏱️ Durée totale", minutes_to_hhmm(duree_totale))
         
         # Heure de fin estimée
-        heure_fin = datetime.strptime(st.session_state.depot['heure_depart'], "%H:%M") + timedelta(minutes=duree_totale)
+        heure_depart_obj = datetime.strptime(st.session_state.depot['heure_depart'], "%H:%M")
+        heure_fin = heure_depart_obj + timedelta(minutes=duree_totale)
         st.info(f"🏁 **Retour estimé au dépôt** : {heure_fin.strftime('%H:%M')}")
         
         # Export Google Maps
@@ -371,21 +425,46 @@ if st.session_state.livraisons:
         with col_export2:
             csv = df.to_csv(index=False).encode('utf-8-sig')
             st.download_button("📥 Télécharger CSV", csv, "tournee_optimisee.csv", "text/csv", use_container_width=True)
-        
-    else:
-        # Affichage liste simple (non optimisée)
-        df_simple = pd.DataFrame([{
-            'Client': d['Client'],
-            'Adresse': d['Adresse'],
-            'Créneau': f"{d['creneau_debut'].strftime('%H:%M') if d['creneau_debut'] else '—'} - {d['creneau_fin'].strftime('%H:%M') if d['creneau_fin'] else '—'}",
-            'Manutention': minutes_to_hhmm(d['duree_manutention'] or 10)
-        } for d in st.session_state.livraisons])
-        
-        st.dataframe(df_simple, use_container_width=True, hide_index=True)
-        st.warning("⚠️ Cliquez sur **OPTIMISER** pour calculer l'itinéraire optimal")
+    
+    # Affichage liste des livraisons avec boutons de modification
+    st.divider()
+    st.subheader("📋 Liste des livraisons")
+    
+    for i, delivery in enumerate(st.session_state.livraisons):
+        with st.container():
+            col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+            
+            with col1:
+                st.write(f"**{delivery['Client']}**")
+                st.caption(delivery['Adresse'])
+            
+            with col2:
+                if delivery['creneau_debut'] and delivery['creneau_fin']:
+                    st.write(f"🕐 {delivery['creneau_debut'].strftime('%H:%M')}-{delivery['creneau_fin'].strftime('%H:%M')}")
+                elif delivery['creneau_debut']:
+                    st.write(f"🕐 Après {delivery['creneau_debut'].strftime('%H:%M')}")
+                elif delivery['creneau_fin']:
+                    st.write(f"🕐 Avant {delivery['creneau_fin'].strftime('%H:%M')}")
+                else:
+                    st.write("🕐 Pas de créneau")
+                st.caption(f"📦 Manutention: {minutes_to_hhmm(delivery['duree_manutention'] or 10)}")
+            
+            with col3:
+                if st.button("✏️", key=f"edit_{i}", help="Modifier", use_container_width=True):
+                    st.session_state.editing_index = i
+                    st.rerun()
+            
+            with col4:
+                if st.button("🗑️", key=f"delete_{i}", help="Supprimer", use_container_width=True):
+                    st.session_state.livraisons.pop(i)
+                    if 'route_optimized' in st.session_state:
+                        del st.session_state.route_optimized
+                    st.rerun()
+            
+            st.divider()
 
 else:
     st.info("👆 Commencez par définir le dépôt, puis ajoutez des livraisons")
 
 st.divider()
-st.caption("💡 **Astuce** : La latence (⏳) s'affiche uniquement si > 15 minutes. Les conflits sont détectés automatiquement.")
+st.caption("💡 **Astuce** : Modifiez ou supprimez une livraison avec les boutons ✏️ et 🗑️. L'optimisation se recalcule automatiquement.")
