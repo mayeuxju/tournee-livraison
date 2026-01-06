@@ -8,6 +8,19 @@ import polyline
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Livreur Pro Suisse", layout="wide")
 
+# Injection de CSS pour coller l'adresse à la bulle bleue et styliser
+st.markdown("""
+    <style>
+    .stTextInput input {
+        background-color: rgba(255, 255, 255, 0.2) !important;
+        color: white !important;
+        border: 1px solid rgba(255, 255, 255, 0.5) !important;
+        font-weight: bold;
+    }
+    .stTextInput label { display: none; } /* Cache le label de l'adresse */
+    </style>
+    """, unsafe_allow_html=True)
+
 if 'stops' not in st.session_state: st.session_state.stops = []
 if 'step' not in st.session_state: st.session_state.step = 2 
 if 'edit_idx' not in st.session_state: st.session_state.edit_idx = None
@@ -15,7 +28,7 @@ if 'edit_idx' not in st.session_state: st.session_state.edit_idx = None
 try:
     gmaps = googlemaps.Client(key=st.secrets["google"]["api_key"])
 except:
-    st.error("Erreur : Clé API Google manquante dans les Secrets.")
+    st.error("Erreur : Clé API Google manquante.")
     st.stop()
 
 def validate_address(n, r, npa, v):
@@ -38,9 +51,9 @@ def draw_map(stops, route_polyline=None):
     m = folium.Map(location=center, zoom_start=8 if not stops else 11)
     for i, s in enumerate(stops):
         folium.Marker([s['lat'], s['lng']], tooltip=f"{'Dépôt' if i==0 else f'Client {i}'}",
-                      icon=folium.Icon(color='red' if i==0 else 'blue')).add_to(m)
+                      icon=folium.Icon(color='red' if i==0 else 'blue', icon='info-sign')).add_to(m)
     if route_polyline:
-        folium.PolyLine(polyline.decode(route_polyline), color="#28a745", weight=5, opacity=0.8).add_to(m)
+        folium.PolyLine(polyline.decode(route_polyline), color="#28a745", weight=5).add_to(m)
     folium_static(m, width=700)
 
 # --- ÉTAPE 2 : CONFIGURATION ---
@@ -84,10 +97,9 @@ if st.session_state.step == 2:
                     st.rerun()
                 else: st.error("Adresse introuvable.")
 
-        st.write("---")
         for i, s in enumerate(st.session_state.stops):
             c1, c2 = st.columns([0.8, 0.2])
-            c1.write(f"**{i}.** {s['full']}")
+            c1.info(f"**{i}.** {s['full']}")
             if c2.button("Modifier", key=f"ed_{i}"):
                 st.session_state.edit_idx = i
                 st.rerun()
@@ -102,7 +114,7 @@ if st.session_state.step == 2:
 
 # --- ÉTAPE 3 : RÉSULTATS ---
 elif st.session_state.step == 3:
-    st.title("🏁 Feuille de Route")
+    st.title("🏁 Feuille de Route Optimisée")
     
     origin = st.session_state.stops[0]['full']
     destinations = [s['full'] for s in st.session_state.stops[1:]]
@@ -116,38 +128,48 @@ elif st.session_state.step == 3:
         st.info(f"🕒 **Départ du dépôt : {current_time.strftime('%H:%M')}**")
         
         for i, leg in enumerate(legs[:-1]):
-            # Info trajet
-            st.markdown(f"<div style='text-align:center; color:#666; font-size:14px; margin:10px 0;'>🚗 {leg['distance']['text']} ({leg['duration']['text']})</div>", unsafe_allow_html=True)
+            # Info trajet (Distance/Durée)
+            st.markdown(f"<div style='text-align:center; color:#555; font-weight:bold; margin:10px 0;'>🚗 Trajet : {leg['distance']['text']} — {leg['duration']['text']}</div>", unsafe_allow_html=True)
             
             arrival_time = current_time + timedelta(seconds=leg['duration']['value'])
             client = st.session_state.stops[order[i] + 1]
             
-            # Latence (Ligne Verte)
+            # --- LATENCE (VERT) ---
             if client.get('use_h'):
                 t_open = datetime.combine(datetime.today(), client['t1'])
                 if arrival_time < t_open:
                     wait_min = int((t_open - arrival_time).total_seconds() / 60)
-                    st.markdown(f"""<div style="border-left: 8px solid #28a745; background-color: #f1f8f1; padding: 10px; margin: 10px 0; color: #155724; font-weight: bold;">
-                        🟢 ATTENTE : {wait_min} min (Ouverture à {client['t1'].strftime('%H:%M')})
+                    st.markdown(f"""<div style="border: 2px solid #28a745; background-color: #d4edda; padding: 10px; border-radius: 5px; margin: 10px 0; color: #155724; text-align: center;">
+                        <b>🟢 LATENCE : {wait_min} min</b> (Attente jusqu'à {client['t1'].strftime('%H:%M')})
                         </div>""", unsafe_allow_html=True)
                     arrival_time = t_open
 
-            # Bulle Client
+            # --- BULLE CLIENT (BLEUE) ---
             with st.container():
-                st.markdown(f"""<div style="border: 1px solid #ddd; padding: 15px; border-radius: 8px; background: #ffffff;">
-                    <b style="font-size: 18px; color: #333;">{i+1}. {client['full'].split(',')[0]}</b><br>
-                    <span style="color: #666;">⌚ Arrivée : <b>{arrival_time.strftime('%H:%M')}</b> | 📦 Sur place : {client['dur']} min</span>
-                    {f"<br><span style='color: #28a745;'>⏱ Créneau : {client['t1'].strftime('%H:%M')} - {client['t2'].strftime('%H:%M')}</span>" if client['use_h'] else ""}
-                </div>""", unsafe_allow_html=True)
-                # Adresse copiable proprement
-                st.code(client['full'], language="text")
+                # En-tête de la bulle
+                st.markdown(f"""
+                <div style="background-color: #0047AB; color: white; padding: 15px; border-radius: 10px 10px 0 0; border: 1px solid #0047AB; margin-bottom: 0px;">
+                    <h3 style="margin:0; color: white; font-size: 20px;">{i+1}. {client['full'].split(',')[0]}</h3>
+                    <div style="margin-top: 8px; font-size: 15px; opacity: 0.9;">
+                        ⌚ Arrivée : <b>{arrival_time.strftime('%H:%M')}</b> | 📦 Temps sur place : {client['dur']} min<br>
+                        {f"⏱ Créneau : {client['t1'].strftime('%H:%M')} - {client['t2'].strftime('%H:%M')}" if client['use_h'] else ""}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Adresse dans la bulle (Copiable en un clic)
+                with st.container():
+                    st.markdown('<div style="background-color: #0047AB; padding: 0 15px 15px 15px; border-radius: 0 0 10px 10px; border: 1px solid #0047AB;">', unsafe_allow_html=True)
+                    st.text_input("Adresse", value=client['full'], key=f"copy_{i}")
+                    st.markdown('</div>', unsafe_allow_html=True)
 
             current_time = arrival_time + timedelta(minutes=client['dur'])
 
+        # CARTE FINALE
         st.write("---")
-        st.subheader("🗺️ Trajet Optimisé")
+        st.subheader("🗺️ Itinéraire sur la carte")
         draw_map(st.session_state.stops, res[0]['overview_polyline']['points'])
 
-    if st.button("⬅️ Modifier la tournée"):
+    if st.button("⬅️ Retour / Modifier"):
         st.session_state.step = 2
         st.rerun()
