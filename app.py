@@ -1,503 +1,220 @@
 import streamlit as st
 import googlemaps
+from streamlit_folium import folium_static
+import folium
 from datetime import datetime, timedelta
-import heapq # Pour l'algorithme de recherche de plus court chemin, potentiellement utile
+import polyline
 
-# --- Importation de la clé API secrète ---
+# --- CONFIGURATION & STYLE ---
+st.set_page_config(page_title="Livreur Pro Suisse", layout="wide")
+
+st.markdown("""
+    <style>
+    .summary-box { padding: 6px 12px; border-radius: 8px; margin-bottom: 5px; display: flex; align-items: center; color: white; font-size: 0.9rem; }
+    .depot-box { background-color: #28a745; border: 1px solid #1e7e34; } 
+    .client-box { background-color: #0047AB; border: 1px solid #003380; }
+    [data-testid="stHorizontalBlock"] { align-items: center; }
+    .client-card { background-color: #0047AB; color: white; padding: 15px; border-radius: 10px 10px 0 0; margin-top: 10px; }
+    .address-box { background-color: #0047AB; padding: 0 15px 10px 15px; border-radius: 0 0 10px 10px; margin-bottom: 10px; }
+    .address-box code { color: white !important; background-color: rgba(255,255,255,0.2) !important; border: none !important; }
+    .badge { padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; margin-left: 10px; background: rgba(255,255,255,0.2); }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- INITIALISATION ---
+if 'stops' not in st.session_state: st.session_state.stops = []
+if 'step' not in st.session_state: st.session_state.step = 1
+if 'vehicle' not in st.session_state: st.session_state.vehicle = "Voiture"
+if 'edit_idx' not in st.session_state: st.session_state.edit_idx = None
+
+def reset_form_fields():
+    st.session_state.f_nom = ""
+    st.session_state.f_num = ""
+    st.session_state.f_rue = ""
+    st.session_state.f_npa = ""
+    st.session_state.f_vil = ""
+    st.session_state.f_type = "Livraison"
+    st.session_state.f_dur = 15
+    st.session_state.f_use_h = False
+    st.session_state.f_t1 = datetime.strptime("08:00", "%H:%M").time()
+    st.session_state.f_t2 = datetime.strptime("18:00", "%H:%M").time()
+    st.session_state.f_hdep = datetime.strptime("08:00", "%H:%M").time()
+    st.session_state.edit_idx = None
+
+if 'f_nom' not in st.session_state: reset_form_fields()
+
 try:
-    from secrets import GOOGLE_API_KEY
-except ImportError:
-    st.error("Le fichier 'secrets.py' n'a pas été trouvé ou n'est pas correctement configuré.")
-    st.error("Veuillez créer un fichier 'secrets.py' avec votre clé GOOGLE_API_KEY.")
+    gmaps = googlemaps.Client(key=st.secrets["google"]["api_key"])
+except:
+    st.error("⚠️ Clé API Google manquante.")
     st.stop()
 
-if GOOGLE_API_KEY == "VOTRE_CLE_API_SECRETE_ICI" or not GOOGLE_API_KEY:
-    st.error("Veuillez remplacer 'VOTRE_CLE_API_SECRETE_ICI' par votre vraie clé API dans le fichier 'secrets.py'.")
-    st.stop()
+def validate_address(n, r, npa, v):
+    query = f"{r} {n} {npa} {v}, Suisse".strip()
+    res = gmaps.geocode(query)
+    if res:
+        full_addr = res[0]['formatted_address']
+        display_addr = full_addr.replace(", Suisse", "").replace(", Switzerland", "")
+        return {
+            "full": full_addr, "display": display_addr,
+            "lat": res[0]['geometry']['location']['lat'],
+            "lng": res[0]['geometry']['location']['lng'],
+            "raw": {"n":n, "r":r, "npa":npa, "v":v}
+        }
+    return None
 
-gmaps = googlemaps.Client(key=GOOGLE_API_KEY)
+# --- ÉTAPE 1 : VÉHICULE ---
+if st.session_state.step == 1:
+    st.title("🚚 Type de transport")
+    v = st.radio("Sélectionnez votre véhicule :", ["Voiture", "Camion (Lourd)"])
+    if st.button("Valider ➡️"):
+        st.session_state.vehicle = v
+        st.session_state.step = 2
+        st.rerun()
 
-# --- Constantes ---
-TEMPS_DE_MARCHE_PAR_DEFAUT = 5 # minutes par arrêt, pour le trajet entre deux points
-SEUIL_ATTENTE_OPTIMALE = timedelta(minutes=15) # Seuil pour déclencher la réorganisation pour minimiser l'attente
+# --- ÉTAPE 2 : CONFIGURATION ---
+elif st.session_state.step == 2:
+    st.title(f"📍 Configuration de la tournée")
+    
+    col_form, col_map = st.columns([1, 1])
 
-# --- Fonctions Utilitaires ---
+    with col_form:
+        idx = st.session_state.edit_idx
+        is_edit = idx is not None
+        is_depot = (not is_edit and len(st.session_state.stops) == 0) or (is_edit and idx == 0)
 
-def obtenir_infos_lieu(adresse):
-    """Récupère les informations de base d'un lieu via l'API Google Places."""
-    try:
-        places_result = gmaps.places(query=adresse, type="establishment")
-        if places_result.get("results"):
-            place_id = places_result["results"][0]["place_id"]
-            details = gmaps.place(place_id=place_id, fields=["name", "formatted_address", "opening_hours"])
-            # Si on trouve un nom plus précis (ex: le nom du magasin), on le préfère
-            nom_lieu = details.get("result", {}).get("name", adresse)
-            return nom_lieu
-        return adresse # Retourne l'adresse si aucun nom spécifique trouvé
-    except Exception as e:
-        st.warning(f"Erreur lors de la récupération des détails pour {adresse}: {e}")
-        return adresse # Retourne l'adresse en cas d'erreur
-
-def calculer_duree_trajet(origine, destination, depart_heure=None):
-    """Calcule la durée du trajet entre deux points en tenant compte du trafic si depart_heure est fourni."""
-    try:
-        if depart_heure:
-            now = depart_heure
+        st.subheader("🏠 Dépôt" if is_depot else "👤 Client")
+        st.session_state.f_nom = st.text_input("Nom / Enseigne", value=st.session_state.f_nom)
+        c1, c2 = st.columns([1, 3])
+        st.session_state.f_num = c1.text_input("N°", value=st.session_state.f_num)
+        st.session_state.f_rue = c2.text_input("Rue", value=st.session_state.f_rue)
+        c3, c4 = st.columns(2)
+        st.session_state.f_npa = c3.text_input("NPA", value=st.session_state.f_npa)
+        st.session_state.f_vil = c4.text_input("Ville", value=st.session_state.f_vil)
+        
+        if is_depot:
+            st.session_state.f_hdep = st.time_input("Heure de départ", value=st.session_state.f_hdep)
         else:
-            now = datetime.now() # Utiliser l'heure actuelle si pas spécifiée
+            cc1, cc2 = st.columns(2)
+            st.session_state.f_type = cc1.selectbox("Type de mission", ["Livraison", "Ramasse"])
+            st.session_state.f_dur = cc2.number_input("Temps (min)", 5, 120, value=st.session_state.f_dur)
+            st.session_state.f_use_h = st.checkbox("Horaire impératif", value=st.session_state.f_use_h)
+            if st.session_state.f_use_h:
+                ca, cb = st.columns(2)
+                st.session_state.f_t1 = ca.time_input("Pas avant", value=st.session_state.f_t1)
+                st.session_state.f_t2 = cb.time_input("Pas après", value=st.session_state.f_t2)
 
-        directions_result = gmaps.directions(
-            origine,
-            destination,
-            mode="driving",
-            departure_time=now # Important pour le trafic en temps réel/prévu
-        )
-
-        if directions_result and directions_result[0].get("legs"):
-            leg = directions_result[0]["legs"][0]
-            duree_secondes = leg["duration_in_traffic"]["value"] if "duration_in_traffic" in leg else leg["duration"]["value"]
-            return timedelta(seconds=duree_secondes)
-        else:
-            st.warning(f"Impossible de calculer le trajet de {origine} à {destination}.")
-            return timedelta(minutes=30) # Valeur par défaut raisonnable en cas d'échec
-    except Exception as e:
-        st.warning(f"Erreur API Google Maps pour trajet {origine} -> {destination}: {e}")
-        return timedelta(minutes=30) # Valeur par défaut en cas d'erreur API
-
-def formater_duree(delta):
-    """Formate un timedelta en HH:MM:SS ou MM:SS."""
-    total_secondes = int(delta.total_seconds())
-    heures = total_secondes // 3600
-    minutes = (total_secondes % 3600) // 60
-    secondes = total_secondes % 60
-    if heures > 0:
-        return f"{heures:02d}:{minutes:02d}:{secondes:02d}"
-    else:
-        return f"{minutes:02d}:{secondes:02d}"
-
-# --- Modèles de données ---
-class PointInteret:
-    def __init__(self, nom, adresse, type_point, contraintes=None, id_unique=None):
-        self.id_unique = id_unique or f"{nom}_{adresse}" # Génère un ID unique
-        self.nom = nom
-        self.adresse = adresse
-        self.type_point = type_point # "Livraison" ou "Ramasse"
-        self.contraintes = contraintes or {}
-        self.temps_service = self.contraintes.get("temps_service", timedelta(minutes=TEMPS_DE_MARCHE_PAR_DEFAUT))
-        self.fenetre_horaire = self.contraintes.get("fenetre_horaire") # Tuple (debut, fin) en minutes depuis minuit
-        self.inclure_dans_aller = self.contraintes.get("inclure_dans_aller", False) # Pour les ramasses spécifiques
-
-    def __repr__(self):
-        return f"PointInteret(nom='{self.nom}', type='{self.type_point}', id='{self.id_unique}')"
-
-    def est_livraison(self):
-        return self.type_point == "Livraison"
-
-    def est_ramasse(self):
-        return self.type_point == "Ramasse"
-
-    def get_fenetre_horaire_str(self):
-        if self.fenetre_horaire:
-            debut_h = self.fenetre_horaire[0] // 60
-            debut_m = self.fenetre_horaire[0] % 60
-            fin_h = self.fenetre_horaire[1] // 60
-            fin_m = self.fenetre_horaire[1] % 60
-            return f"{debut_h:02d}:{debut_m:02d} - {fin_h:02d}:{fin_m:02d}"
-        return ""
-
-# --- Logique d'Optimisation ---
-
-def optimiser_tournee(points_depart, points_arrivee, depart_adresse_initiale, heure_debut_tournee):
-    """
-    Optimise la tournée en respectant les livraisons d'abord, puis les ramasses,
-    en intégrant la priorité horaire et les ramasses spécifiques.
-
-    Args:
-        points_depart (list[PointInteret]): Liste des points de livraison.
-        points_arrivee (list[PointInteret]): Liste des points de ramasse.
-        depart_adresse_initiale (str): Adresse de départ du véhicule.
-        heure_debut_tournee (datetime): Heure de début de la tournée.
-
-    Returns:
-        tuple: (liste_arrets_ordonnee, total_duree_estimation)
-    """
-
-    # Séparation des points en fonction du type et de l'option "inclure_dans_aller"
-    livraisons_finales = [p for p in points_depart if p.est_livraison()]
-    ramasses_retour_normal = [p for p in points_arrivee if p.est_ramasse() and not p.inclure_dans_aller]
-    ramasses_retour_speciales = [p for p in points_arrivee if p.est_ramasse() and p.inclure_dans_aller]
-
-    # L'ordre "idéal" est: toutes les livraisons (normales + spéciales), puis les ramasses de retour normales.
-    # L'algorithme actuel ne réorganise pas les livraisons entre elles, il les prend dans l'ordre fourni.
-    # On va construire la partie "aller" en ajoutant les ramasses spéciales dedans.
-    
-    # Fusionne les livraisons et les ramasses spéciales pour la phase "aller"
-    points_aller = livraisons_finales + ramasses_retour_speciales
-    points_retour = ramasses_retour_normal # Ces points ne seront visités qu'après la fin des livraisons et ramasses spéciales
-
-    # --- Calcul de la partie "Aller" ---
-    tournee_aller_optimisee = []
-    heure_actuelle = heure_debut_tournee
-    adresse_actuelle = depart_adresse_initiale
-    
-    # Boucle principale pour ordonnancer les points de l'aller
-    # C'est ici que l'on essaie d'optimiser pour l'heure et on intègre les ramasses spéciales
-    
-    # 1. Pré-calculer les temps d'arrivée théoriques pour chaque point de l'aller
-    points_aller_avec_temps = []
-    temp_heure = heure_debut_tournee
-    temp_adresse = depart_adresse_initiale
-    for point in points_aller:
-        duree_trajet = calculer_duree_trajet(temp_adresse, point.adresse, temp_heure)
-        temp_heure += duree_trajet
-        
-        # Gestion des contraintes horaires et temps de service
-        attente = timedelta()
-        heure_arrivee_prevue = temp_heure
-        
-        if point.fenetre_horaire:
-            debut_fenetre_minutes = point.fenetre_horaire[0]
-            fin_fenetre_minutes = point.fenetre_horaire[1]
-            
-            # Convertir heure_arrivee_prevue en minutes depuis minuit pour comparaison
-            arrivee_minutes = heure_arrivee_prevue.hour * 60 + heure_arrivee_prevue.minute
-            
-            if arrivee_minutes < debut_fenetre_minutes:
-                attente = timedelta(minutes=(debut_fenetre_minutes - arrivee_minutes))
-                heure_actuelle_pour_point = heure_arrivee_prevue + attente
-            else:
-                heure_actuelle_pour_point = heure_arrivee_prevue
-            
-            if heure_actuelle_pour_point.hour * 60 + heure_actuelle_pour_point.minute > fin_fenetre_minutes:
-                # On dépasse la fenêtre, ce scénario est plus complexe. Pour l'instant, on marque comme non optimal
-                # ou on peut décider de ne pas le mettre dans l'aller s'il y a un risque.
-                # Pour simplifier, on assume que c'est possible mais cela peut nécessiter une réorganisation plus poussée
-                pass # Pour l'instant, on continue, le système pourrait devoir gérer un dépassement
-
-        else:
-            heure_actuelle_pour_point = heure_arrivee_prevue
-
-        heure_actuelle_pour_point += point.temps_service # Ajout du temps de service
-
-        points_aller_avec_temps.append({
-            "point": point,
-            "heure_arrivee_prevue": heure_arrivee_prevue,
-            "attente": attente,
-            "heure_depart_reel": heure_actuelle_pour_point,
-            "duree_trajet_precedente": duree_trajet
-        })
-        temp_adresse = point.adresse
-        
-    # --- Stratégie d'optimisation pour l'attente ---
-    # Si l'attente totale est trop grande, on pourrait essayer de réordonner les livraisons/ramasses spéciales
-    # Pour cette version, on garde l'ordre initial des livraisons et on insère les ramasses spéciales à la fin des livraisons.
-    # L'optimisation "moins d'attente" est complexe et impliquerait un algorithme de plus court chemin plus sophistiqué.
-    # Pour l'instant, on privilégie la structure : Livraisons -> Ramasses Spéciales (si incluses) -> Ramasses Normales.
-    
-    # Construction de la tournée finale avec les temps calculés
-    tournee_optimisee = []
-    heure_courante_calcul = heure_debut_tournee
-    adresse_courante_calcul = depart_adresse_initiale
-    
-    # Points à visiter dans l'ordre : Livraisons -> Ramasses Spéciales
-    points_a_visiter_aller = livraisons_finales + ramasses_retour_speciales
-
-    for point in points_a_visiter_aller:
-        duree_trajet = calculer_duree_trajet(adresse_courante_calcul, point.adresse, heure_courante_calcul)
-        heure_arrivee_reel = heure_courante_calcul + duree_trajet
-        
-        attente = timedelta()
-        heure_depart_reelle = heure_arrivee_reel
-
-        if point.fenetre_horaire:
-            debut_fenetre_minutes = point.fenetre_horaire[0]
-            fin_fenetre_minutes = point.fenetre_horaire[1]
-            
-            # Convertir heure_arrivee_reel en minutes depuis minuit pour comparaison
-            arrivee_reel_minutes = heure_arrivee_reel.hour * 60 + heure_arrivee_reel.minute
-            
-            if arrivee_reel_minutes < debut_fenetre_minutes:
-                attente = timedelta(minutes=(debut_fenetre_minutes - arrivee_reel_minutes))
-                heure_depart_reelle = heure_arrivee_reel + attente
-            else:
-                heure_depart_reelle = heure_arrivee_reel
-            
-            # Vérification si on dépasse la fin de la fenêtre.
-            # Si c'est le cas, on pourrait décider de ne pas inclure ce point dans l'aller,
-            # ou le marquer comme une exception. Pour l'instant, on le laisse faire.
-            if heure_depart_reelle.hour * 60 + heure_depart_reelle.minute > fin_fenetre_minutes:
-                st.warning(f"L'arrivée à {point.nom} ({point.adresse}) dépasse la fenêtre horaire ({point.get_fenetre_horaire_str()}). L'heure de départ sera {heure_depart_reelle.strftime('%H:%M')}.")
-
-        heure_depart_reelle += point.temps_service
-        
-        tournee_optimisee.append({
-            "point": point,
-            "heure_arrivee": heure_arrivee_reel,
-            "attente": attente,
-            "heure_depart": heure_depart_reelle,
-            "duree_trajet_precedente": duree_trajet,
-            "nom_lieu_specifique": obtenir_infos_lieu(point.adresse) # Récupère le nom plus précis si disponible
-        })
-        
-        heure_courante_calcul = heure_depart_reelle
-        adresse_courante_calcul = point.adresse
-
-    # --- Calcul de la partie "Retour" (Ramasses normales) ---
-    # Ces points ne sont visités qu'après la fin de la phase "aller"
-    points_a_visiter_retour = ramasses_retour_normal
-
-    for point in points_a_visiter_retour:
-        duree_trajet = calculer_duree_trajet(adresse_courante_calcul, point.adresse, heure_courante_calcul)
-        heure_arrivee_reel = heure_courante_calcul + duree_trajet
-        
-        attente = timedelta() # On suppose que les ramasses n'ont pas de fenêtre horaire stricte dans ce modèle
-        heure_depart_reelle = heure_arrivee_reel
-        
-        # Pas de contrainte horaire ici pour les ramasses, mais on pourrait en ajouter.
-        # On ajoute juste le temps de service.
-        heure_depart_reelle += point.temps_service
-        
-        tournee_optimisee.append({
-            "point": point,
-            "heure_arrivee": heure_arrivee_reel,
-            "attente": attente,
-            "heure_depart": heure_depart_reelle,
-            "duree_trajet_precedente": duree_trajet,
-            "nom_lieu_specifique": obtenir_infos_lieu(point.adresse)
-        })
-        
-        heure_courante_calcul = heure_depart_reelle
-        adresse_courante_calcul = point.adresse
-
-    # Calcul du total de la durée de la tournée
-    duree_totale_estimee = heure_courante_calcul - heure_debut_tournee
-
-    return tournee_optimisee, duree_totale_estimee
-
-# --- Interface Streamlit ---
-
-st.set_page_config(page_title="Optimiseur de Tournée", layout="wide")
-
-st.title("🚗 Optimiseur de Tournée Intelligent")
-st.markdown("Planifiez vos livraisons et ramasses de manière efficace.")
-
-# --- Section Configuration ---
-st.sidebar.header("Configuration Initiale")
-
-# Adresse de départ et heure
-depart_adresse_initiale = st.sidebar.text_input("Adresse de départ du véhicule :", "Rue du Rhône 1, Genève")
-heure_debut_str = st.sidebar.text_input("Heure de début de la tournée (HH:MM) :", "08:00")
-# Combiner date du jour et heure saisie
-try:
-    heure_debut_tournee_obj = datetime.combine(datetime.today(), datetime.strptime(heure_debut_str, "%H:%M").time())
-except ValueError:
-    st.sidebar.error("Format d'heure invalide. Veuillez utiliser HH:MM (ex: 08:00).")
-    st.stop()
-
-# Séparation des entrées pour les livraisons et les ramasses
-st.header("Points de Passage")
-
-# Utilisation de st.session_state pour persister les données des points
-if 'points_data' not in st.session_state:
-    st.session_state.points_data = {
-        "livraisons": [],
-        "ramasses": []
-    }
-
-# --- Zone d'ajout de Livraisons ---
-st.subheader("Ajouter une Livraison")
-with st.expander("Détails Livraison", expanded=False):
-    nom_livraison = st.text_input("Nom du client (ex: Magasin X) :", key="nom_livraison_input")
-    adresse_livraison = st.text_input("Adresse complète :", key="adresse_livraison_input")
-    
-    # Fenêtre horaire pour les livraisons
-    st.write("Fenêtre horaire de livraison (optionnel) :")
-    col_debut_h, col_debut_m, col_fin_h, col_fin_m = st.columns(4)
-    debut_h = col_debut_h.number_input("Début H", min_value=0, max_value=23, value=9, key="debut_h_livraison")
-    debut_m = col_debut_m.number_input("Début M", min_value=0, max_value=59, value=30, key="debut_m_livraison")
-    fin_h = col_fin_h.number_input("Fin H", min_value=0, max_value=23, value=11, key="fin_h_livraison")
-    fin_m = col_fin_m.number_input("Fin M", min_value=0, max_value=59, value=30, key="fin_m_livraison")
-    
-    temps_service_livraison_min = st.number_input("Temps de service estimé (minutes) :", min_value=1, value=10, key="temps_service_livraison")
-
-    if st.button("Ajouter cette Livraison", key="add_livraison_btn"):
-        if nom_livraison and adresse_livraison:
-            fenetre_horaire_minutes = (debut_h * 60 + debut_m, fin_h * 60 + fin_m)
-            if fenetre_horaire_minutes[0] >= fenetre_horaire_minutes[1]:
-                st.warning("L'heure de début de la fenêtre horaire doit être avant l'heure de fin.")
-            else:
-                nouvelle_livraison = PointInteret(
-                    nom=nom_livraison,
-                    adresse=adresse_livraison,
-                    type_point="Livraison",
-                    contraintes={
-                        "temps_service": timedelta(minutes=temps_service_livraison_min),
-                        "fenetre_horaire": fenetre_horaire_minutes
-                    }
-                )
-                st.session_state.points_data["livraisons"].append(nouvelle_livraison)
-                # Vider les champs pour la prochaine saisie
-                st.session_state.nom_livraison_input = ""
-                st.session_state.adresse_livraison_input = ""
-                st.rerun() # Rafraîchir pour afficher le nouveau point et vider les inputs
-        else:
-            st.warning("Veuillez renseigner le nom et l'adresse de la livraison.")
-
-# --- Zone d'ajout de Ramasses ---
-st.subheader("Ajouter une Ramasse")
-with st.expander("Détails Ramasse", expanded=False):
-    nom_ramasse = st.text_input("Nom du client (ex: Entrepôt Y) :", key="nom_ramasse_input")
-    adresse_ramasse = st.text_input("Adresse complète :", key="adresse_ramasse_input")
-    
-    # Option spéciale: Inclure dans l'aller
-    inclure_dans_aller_ramasse = st.checkbox("Inclure dans l'aller (traiter comme une livraison pour le calcul du trajet aller) ?", key="inclure_dans_aller_checkbox")
-    
-    # Fenêtre horaire pour les ramasses (moins courant mais possible)
-    st.write("Fenêtre horaire de ramasse (optionnel) :")
-    col_debut_h_r, col_debut_m_r, col_fin_h_r, col_fin_m_r = st.columns(4)
-    debut_h_r = col_debut_h_r.number_input("Début H", min_value=0, max_value=23, value=13, key="debut_h_ramasse")
-    debut_m_r = col_debut_m_r.number_input("Début M", min_value=0, max_value=59, value=0, key="debut_m_ramasse")
-    fin_h_r = col_fin_h_r.number_input("Fin H", min_value=0, max_value=23, value=17, key="fin_h_ramasse")
-    fin_m_r = col_fin_m_r.number_input("Fin M", min_value=0, max_value=59, value=0, key="fin_m_ramasse")
-    
-    temps_service_ramasse_min = st.number_input("Temps de service estimé (minutes) :", min_value=1, value=10, key="temps_service_ramasse")
-
-    if st.button("Ajouter cette Ramasse", key="add_ramasse_btn"):
-        if nom_ramasse and adresse_ramasse:
-            fenetre_horaire_minutes_r = (debut_h_r * 60 + debut_m_r, fin_h_r * 60 + fin_m_r)
-            if fenetre_horaire_minutes_r[0] >= fenetre_horaire_minutes_r[1]:
-                 st.warning("L'heure de début de la fenêtre horaire doit être avant l'heure de fin.")
-            else:
-                nouvelle_ramasse = PointInteret(
-                    nom=nom_ramasse,
-                    adresse=adresse_ramasse,
-                    type_point="Ramasse",
-                    contraintes={
-                        "temps_service": timedelta(minutes=temps_service_ramasse_min),
-                        "fenetre_horaire": fenetre_horaire_minutes_r,
-                        "inclure_dans_aller": inclure_dans_aller_ramasse
-                    }
-                )
-                st.session_state.points_data["ramasses"].append(nouvelle_ramasse)
-                # Vider les champs pour la prochaine saisie
-                st.session_state.nom_ramasse_input = ""
-                st.session_state.adresse_ramasse_input = ""
+        if st.button("✅ Enregistrer", type="primary", use_container_width=True):
+            res = validate_address(st.session_state.f_num, st.session_state.f_rue, st.session_state.f_npa, st.session_state.f_vil)
+            if res:
+                res["nom"] = "DÉPÔT" if is_depot else (st.session_state.f_nom or f"Client {len(st.session_state.stops)}")
+                if is_depot: res["h_dep"] = st.session_state.f_hdep
+                else: res.update({"type": st.session_state.f_type, "use_h": st.session_state.f_use_h, "dur": st.session_state.f_dur, "t1": st.session_state.f_t1, "t2": st.session_state.f_t2})
+                
+                if is_edit: st.session_state.stops[idx] = res
+                else: st.session_state.stops.append(res)
+                reset_form_fields()
                 st.rerun()
-        else:
-            st.warning("Veuillez renseigner le nom et l'adresse de la ramasse.")
 
-# --- Affichage des points ajoutés ---
-st.header("Liste des Points de Passage Ajoutés")
-
-col_livraisons, col_ramasses = st.columns(2)
-
-with col_livraisons:
-    st.subheader("Livraisons")
-    if not st.session_state.points_data["livraisons"]:
-        st.info("Aucune livraison ajoutée pour le moment.")
-    else:
-        for i, point in enumerate(st.session_state.points_data["livraisons"]):
-            st.write(f"**{point.nom}** ({point.type_point})")
-            st.caption(f"📍 {point.adresse}")
-            if point.get_fenetre_horaire_str():
-                st.caption(f"⏰ Fenêtre : {point.get_fenetre_horaire_str()}")
-            st.caption(f"⏱️ Service : {point.temps_service.total_seconds() // 60} min")
-            
-            # Bouton pour supprimer le point
-            if st.button("Supprimer", key=f"del_liv_{i}"):
-                st.session_state.points_data["livraisons"].pop(i)
+        if len(st.session_state.stops) > 1:
+            st.write("---")
+            st.subheader("🚀 Optimisation")
+            algo = st.radio("Stratégie de tournée :", 
+                           ["Logique Chauffeur (Aller -> Retour)", "Mathématique (Le plus court)"],
+                           help="Le mode 'Logique' livre toutes les livraisons à l'aller et fait les ramasses au retour.")
+            if st.button("CALCULER L'ITINÉRAIRE", use_container_width=True, type="primary"):
+                st.session_state.algo = algo
+                st.session_state.step = 3
                 st.rerun()
-            st.markdown("---")
 
-with col_ramasses:
-    st.subheader("Ramasses")
-    if not st.session_state.points_data["ramasses"]:
-        st.info("Aucune ramasse ajoutée pour le moment.")
-    else:
-        for i, point in enumerate(st.session_state.points_data["ramasses"]):
-            prefix = ">> " if point.inclure_dans_aller else ""
-            st.write(f"**{prefix}{point.nom}** ({point.type_point})")
-            st.caption(f"📍 {point.adresse}")
-            if point.inclure_dans_aller:
-                st.caption("✨ Traitée dans l'aller")
-            if point.get_fenetre_horaire_str():
-                st.caption(f"⏰ Fenêtre : {point.get_fenetre_horaire_str()}")
-            st.caption(f"⏱️ Service : {point.temps_service.total_seconds() // 60} min")
-            
-            # Bouton pour supprimer le point
-            if st.button("Supprimer", key=f"del_ram_{i}"):
-                st.session_state.points_data["ramasses"].pop(i)
+        st.subheader("📋 Liste des arrêts")
+        for i, s in enumerate(st.session_state.stops):
+            color_class = "depot-box" if i == 0 else "client-box"
+            st.markdown(f'<div class="summary-box {color_class}">', unsafe_allow_html=True)
+            cols = st.columns([0.05, 0.75, 0.1, 0.1])
+            cols[0].write("🏠" if i == 0 else f"{i}")
+            type_tag = f'<span class="badge">{"📦 Liv." if s.get("type")=="Livraison" else "🔄 Ram."}</span>' if i > 0 else ""
+            cols[1].markdown(f"**{s['nom']}** | {s['display']} {type_tag}", unsafe_allow_html=True)
+            if cols[2].button("✏️", key=f"ed_{i}"):
+                st.session_state.edit_idx = i
+                st.session_state.f_nom, st.session_state.f_num = s['nom'], s['raw']['n']
+                st.session_state.f_rue, st.session_state.f_npa, st.session_state.f_vil = s['raw']['r'], s['raw']['npa'], s['raw']['v']
+                if i == 0: st.session_state.f_hdep = s['h_dep']
+                else:
+                    st.session_state.f_dur, st.session_state.f_use_h, st.session_state.f_type = s['dur'], s['use_h'], s['type']
+                    st.session_state.f_t1, st.session_state.f_t2 = s['t1'], s['t2']
                 st.rerun()
-            st.markdown("---")
+            if cols[3].button("🗑️", key=f"dl_{i}"):
+                st.session_state.stops.pop(i)
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
 
-# --- Bouton pour lancer l'optimisation ---
-if st.button("🚀 Calculer la meilleure tournée", key="calculate_btn"):
-    if not depart_adresse_initiale:
-        st.error("Veuillez renseigner l'adresse de départ.")
-    elif not st.session_state.points_data["livraisons"] and not st.session_state.points_data["ramasses"]:
-        st.warning("Veuillez ajouter au moins un point de passage (livraison ou ramasse).")
-    else:
-        # Appel de la fonction d'optimisation
-        tournee_optimisee, duree_totale_estimee = optimiser_tournee(
-            st.session_state.points_data["livraisons"],
-            st.session_state.points_data["ramasses"],
-            depart_adresse_initiale,
-            heure_debut_tournee_obj
-        )
+    with col_map:
+        m = folium.Map(location=[46.8, 8.2], zoom_start=7)
+        for i, s in enumerate(st.session_state.stops):
+            folium.Marker([s['lat'], s['lng']], tooltip=s['nom'], icon=folium.Icon(color="green" if i==0 else "blue")).add_to(m)
+        folium_static(m, width=600)
 
-        st.header("Planification Détaillée de la Tournée")
+# --- ÉTAPE 3 : RÉSULTATS ---
+elif st.session_state.step == 3:
+    st.title("🏁 Itinéraire Optimisé")
+    t_mult = 1.25 if st.session_state.vehicle == "Camion (Lourd)" else 1.0
+    depot = st.session_state.stops[0]
+    
+    # --- LOGIQUE DE TRI ---
+    clients = st.session_state.stops[1:]
+    
+    if st.session_state.algo == "Logique Chauffeur (Aller -> Retour)":
+        # On sépare Livraisons et Ramasses
+        livraisons = [c for c in clients if c['type'] == "Livraison"]
+        ramasses = [c for c in clients if c['type'] == "Ramasse"]
         
-        if not tournee_optimisee:
-            st.info("Aucune tournée calculée. Veuillez vérifier les points ajoutés.")
-        else:
-            total_temps_parcours = timedelta()
-            total_attente = timedelta()
+        # Tri simple par distance au dépôt (à vol d'oiseau pour la logique)
+        # Livraisons : de la plus proche à la plus loin
+        livraisons.sort(key=lambda x: ((x['lat']-depot['lat'])**2 + (x['lng']-depot['lng'])**2))
+        # Ramasses : de la plus loin à la plus proche (retour vers dépôt)
+        ramasses.sort(key=lambda x: ((x['lat']-depot['lat'])**2 + (x['lng']-depot['lng'])**2), reverse=True)
+        
+        ordered_clients = livraisons + ramasses
+        # On demande à Google de calculer le trajet dans cet ordre PRÉCIS (sans ré-optimiser)
+        waypoints = [c['full'] for c in ordered_clients]
+        res = gmaps.directions(depot['full'], depot['full'], waypoints=waypoints, optimize_waypoints=False)
+        order = list(range(len(ordered_clients)))
+    else:
+        # Optimisation Google classique (Mathématique)
+        waypoints = [c['full'] for c in clients]
+        res = gmaps.directions(depot['full'], depot['full'], waypoints=waypoints, optimize_waypoints=True)
+        order = res[0]['waypoint_order']
+        ordered_clients = [clients[i] for i in order]
+
+    if res:
+        legs = res[0]['legs']
+        current_time = datetime.combine(datetime.today(), depot['h_dep'])
+        m_final = folium.Map(location=[depot['lat'], depot['lng']], zoom_start=10)
+        st.success(f"🏠 **DÉPART DU DÉPÔT : {current_time.strftime('%H:%M')}**")
+
+        for i, leg in enumerate(legs[:-1]):
+            dur_mins = int((leg['duration']['value'] / 60) * t_mult)
+            st.markdown(f'<div style="border: 2px solid #FF8C00; border-radius: 10px; padding: 5px; text-align: center; margin: 15px 0; color: #FF8C00; font-weight: bold;">⏱️ Trajet : {leg["distance"]["text"]} ({dur_mins} min)</div>', unsafe_allow_html=True)
             
-            st.write(f"**Adresse de départ :** {depart_adresse_initiale}")
-            st.write(f"**Heure de début :** {heure_debut_tournee_obj.strftime('%H:%M')}")
-            st.write(f"**Durée totale estimée de la tournée :** {formater_duree(duree_totale_estimee)}")
-            st.markdown("---")
+            arrival_time = current_time + timedelta(minutes=dur_mins)
+            client = ordered_clients[i]
+            
+            if client['use_h'] and arrival_time < datetime.combine(datetime.today(), client['t1']):
+                arrival_time = datetime.combine(datetime.today(), client['t1'])
 
-            for i, etape in enumerate(tournee_optimisee):
-                point = etape["point"]
-                
-                prefix_type = ""
-                if point.est_livraison():
-                    prefix_type = "✅ **Livraison :**"
-                elif point.est_ramasse():
-                    prefix_type = "📦 **Ramasse :**"
-                    if point.inclure_dans_aller:
-                        prefix_type = "✨ **Ramasse (Aller) :**"
-                
-                st.write(f"{i+1}. {prefix_type} **{point.nom}**")
-                st.caption(f"📍 {point.adresse}")
-                st.caption(f"   Arrivée : {etape['heure_arrivee'].strftime('%H:%M:%S')} | Attente : {formater_duree(etape['attente'])} | Départ : {etape['heure_depart'].strftime('%H:%M:%S')}")
-                
-                if etape["duree_trajet_precedente"].total_seconds() > 0:
-                    st.caption(f"   Trajet depuis point précédent : {formater_duree(etape['duree_trajet_precedente'])}")
+            type_icon = "📦" if client['type'] == "Livraison" else "🔄"
+            st.markdown(f'<div class="client-card"><h3 style="margin:0; color: white;">{i+1}. {type_icon} {client["nom"]}</h3><p style="margin: 5px 0; opacity: 0.9;">⌚ Arrivée : <b>{arrival_time.strftime("%H:%M")}</b> | {client["type"]} ({client["dur"]} min)</p></div>', unsafe_allow_html=True)
+            st.markdown('<div class="address-box">', unsafe_allow_html=True)
+            st.code(client['full'], language=None)
+            st.markdown('</div>', unsafe_allow_html=True)
 
-                total_temps_parcours += etape["duree_trajet_precedente"]
-                total_attente += etape["attente"]
-                
-                st.markdown("---")
+            folium.Marker([client['lat'], client['lng']], popup=client['nom'], icon=folium.Icon(color="blue")).add_to(m_final)
+            current_time = arrival_time + timedelta(minutes=client['dur'])
 
-            # Résumé des temps
-            st.subheader("Récapitulatif des Temps")
-            st.write(f"Temps total de trajet entre les points : {formater_duree(total_temps_parcours)}")
-            st.write(f"Temps total d'attente aux fenêtres horaires : {formater_duree(total_attente)}")
-            st.write(f"Temps total de service aux arrêts : {sum([p['point'].temps_service for p in tournee_optimisee], timedelta())}")
-            st.write(f"Durée totale estimée de la tournée : {formater_duree(duree_totale_estimee)}")
+        folium.PolyLine(polyline.decode(res[0]['overview_polyline']['points']), color="blue", weight=5).add_to(m_final)
+        folium_static(m_final, width=1000)
 
-# --- Instructions ---
-st.sidebar.header("Instructions")
-st.sidebar.markdown("""
-1.  **Configurez votre départ :** Entrez l'adresse de départ et l'heure de début.
-2.  **Ajoutez les points :** Utilisez les sections 'Ajouter une Livraison' et 'Ajouter une Ramasse'.
-    *   Pour les livraisons, spécifiez la fenêtre horaire et le temps de service.
-    *   Pour les ramasses, décidez si elle doit être traitée dans l'aller ('Inclure dans l'aller').
-3.  **Vérifiez la liste :** Assurez-vous que tous les points sont corrects. Vous pouvez les supprimer.
-4.  **Calculez la tournée :** Cliquez sur 'Calculer la meilleure tournée'.
-5.  **Consultez le résultat :** L'itinéraire optimisé s'affichera avec les horaires détaillés.
-""")
-st.sidebar.markdown("---")
-st.sidebar.info("Ce script utilise l'API Google Maps. Assurez-vous que votre clé API est valide et autorisée.")
+        if st.button("⬅️ Modifier"):
+            st.session_state.step = 2
+            st.rerun()
