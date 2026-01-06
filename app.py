@@ -1,222 +1,283 @@
 import streamlit as st
 import pandas as pd
 import googlemaps
-from datetime import datetime
+from datetime import datetime, timedelta
+import folium
+from streamlit_folium import st_folium
+import plotly.express as px
+import plotly.graph_objects as go
 
-# ============================================
-# 🧪 TEST DE LA CLÉ API GOOGLE MAPS
-# ============================================
-
+# Configuration de la page
 st.set_page_config(
-    page_title="Optimisation Tournées Suisse",
+    page_title="Optimisation Tournées - Suisse",
     page_icon="🚚",
     layout="wide"
 )
 
-st.title("🧪 Test de connexion Google Maps")
+# Initialisation de Google Maps
+@st.cache_resource
+def init_gmaps():
+    try:
+        api_key = st.secrets["google"]["api_key"]
+        return googlemaps.Client(key=api_key)
+    except Exception as e:
+        st.error(f"❌ Erreur de connexion Google Maps : {str(e)}")
+        return None
 
-try:
-    # Récupérer la clé API depuis les secrets
-    google_api_key = st.secrets["google"]["api_key"]
+gmaps = init_gmaps()
+
+# Initialisation de la session
+if 'livraisons' not in st.session_state:
+    st.session_state.livraisons = []
+
+# Titre
+st.title("🚚 Optimisation de Tournées - Suisse")
+st.markdown("---")
+
+# Sidebar
+with st.sidebar:
+    st.header("📍 Ajouter une livraison")
     
-    # Créer le client Google Maps
-    gmaps = googlemaps.Client(key=google_api_key)
-    
-    # Test simple : Lausanne → Genève
-    st.info("🔄 Test de connexion en cours...")
-    
-    test_result = gmaps.distance_matrix(
-        origins=["Lausanne, Suisse"],
-        destinations=["Genève, Suisse"],
-        mode="driving",
-        language="fr"
-    )
-    
-    # Vérifier le résultat
-    if test_result['status'] == 'OK':
-        distance = test_result['rows'][0]['elements'][0]['distance']['text']
-        duree = test_result['rows'][0]['elements'][0]['duration']['text']
-        
-        st.success("✅ CONNEXION GOOGLE MAPS RÉUSSIE !")
+    with st.form("formulaire_livraison"):
+        nom_client = st.text_input("👤 Nom du client")
+        adresse = st.text_area("📍 Adresse complète", 
+                               help="Ex: Rue du Lac 15, 1005 Lausanne")
         
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("🚗 Distance Lausanne → Genève", distance)
+            heure_debut = st.time_input("🕐 Heure début", 
+                                        value=datetime.strptime("09:00", "%H:%M").time())
         with col2:
-            st.metric("⏱️ Temps de trajet", duree)
+            heure_fin = st.time_input("🕐 Heure fin", 
+                                      value=datetime.strptime("17:00", "%H:%M").time())
         
-        st.balloons()
+        duree_livraison = st.number_input("⏱️ Durée livraison (min)", 
+                                         min_value=5, max_value=120, value=15)
         
-    else:
-        st.error(f"❌ Erreur dans la réponse de l'API : {test_result['status']}")
-        st.json(test_result)
+        submitted = st.form_submit_button("➕ Ajouter", use_container_width=True)
         
-except KeyError as e:
-    st.error("❌ CLÉ API MANQUANTE DANS LES SECRETS !")
-    st.warning("👉 Allez dans **Settings → Secrets** sur Streamlit Cloud")
-    st.info("Ajoutez exactement ce format :")
-    st.code("""[google]
-api_key = "VOTRE_CLE_ICI"
-    """, language="toml")
-    st.stop()
+        if submitted and nom_client and adresse:
+            if gmaps:
+                # Géocodage de l'adresse
+                try:
+                    geocode_result = gmaps.geocode(adresse + ", Suisse")
+                    if geocode_result:
+                        location = geocode_result[0]['geometry']['location']
+                        
+                        livraison = {
+                            'id': len(st.session_state.livraisons) + 1,
+                            'client': nom_client,
+                            'adresse': adresse,
+                            'lat': location['lat'],
+                            'lng': location['lng'],
+                            'heure_debut': heure_debut.strftime("%H:%M"),
+                            'heure_fin': heure_fin.strftime("%H:%M"),
+                            'duree': duree_livraison,
+                            'statut': '⏳ En attente'
+                        }
+                        
+                        st.session_state.livraisons.append(livraison)
+                        st.success(f"✅ {nom_client} ajouté !")
+                        st.rerun()
+                    else:
+                        st.error("❌ Adresse introuvable")
+                except Exception as e:
+                    st.error(f"❌ Erreur : {str(e)}")
+            else:
+                st.error("❌ Google Maps non disponible")
+
+    st.markdown("---")
     
-except Exception as e:
-    st.error(f"❌ ERREUR : {str(e)}")
-    st.exception(e)
-    st.stop()
-
-# ============================================
-# 🚚 APPLICATION PRINCIPALE
-# ============================================
-
-st.divider()
-st.title("🚚 Optimisation de Tournées - Suisse")
-
-# Initialiser la session
-if 'deliveries' not in st.session_state:
-    st.session_state.deliveries = []
-
-# Sidebar - Informations
-with st.sidebar:
-    st.header("ℹ️ Comment utiliser")
-    st.markdown("""
-    1. **Ajoutez votre dépôt** (point de départ)
-    2. **Ajoutez vos clients** (destinations)
-    3. **Cliquez sur "Optimiser"**
-    4. **Lancez la navigation** dans Google Maps
-    """)
-    
-    st.divider()
-    
+    # Statistiques
     st.header("📊 Statistiques")
-    st.metric("Livraisons ajoutées", len(st.session_state.deliveries))
-
-# Section d'ajout d'une livraison
-st.header("➕ Ajouter une livraison")
-
-col1, col2, col3 = st.columns([2, 2, 1])
-
-with col1:
-    nom = st.text_input("Nom du point", placeholder="Ex: Dépôt Lausanne")
-
-with col2:
-    adresse = st.text_input("Adresse complète", placeholder="Ex: Route de Berne 10, 1010 Lausanne")
-
-with col3:
-    type_point = st.selectbox("Type", ["🏢 Dépôt", "📦 Client"])
-
-if st.button("➕ Ajouter", type="primary"):
-    if nom and adresse:
-        st.session_state.deliveries.append({
-            'nom': nom,
-            'adresse': adresse,
-            'type': type_point
-        })
-        st.success(f"✅ {nom} ajouté !")
-        st.rerun()
+    if st.session_state.livraisons:
+        st.metric("Total livraisons", len(st.session_state.livraisons))
+        
+        # Durée totale estimée
+        duree_totale = sum(l['duree'] for l in st.session_state.livraisons)
+        st.metric("Temps total", f"{duree_totale} min")
     else:
-        st.error("⚠️ Veuillez remplir tous les champs")
-
-# Afficher les livraisons
-st.divider()
-st.header("📋 Liste des points")
-
-if st.session_state.deliveries:
+        st.info("Aucune livraison ajoutée")
     
     # Bouton pour tout effacer
-    col1, col2, col3 = st.columns([1, 1, 3])
-    with col1:
-        if st.button("🗑️ Tout effacer", type="secondary"):
-            st.session_state.deliveries = []
+    if st.session_state.livraisons:
+        if st.button("🗑️ Tout effacer", use_container_width=True):
+            st.session_state.livraisons = []
             st.rerun()
+
+# Zone principale
+if not st.session_state.livraisons:
+    st.info("👈 Ajoutez des livraisons dans le menu de gauche pour commencer")
+else:
+    # Onglets
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Liste", "🗺️ Carte", "📊 Analyse", "📥 Export"])
     
-    # Afficher la liste
-    for idx, delivery in enumerate(st.session_state.deliveries):
-        col1, col2, col3 = st.columns([3, 3, 1])
+    # ============================================================
+    # TAB 1 : LISTE DES LIVRAISONS
+    # ============================================================
+    with tab1:
+        st.subheader("📋 Liste des points de livraison")
         
-        with col1:
-            st.write(f"**{delivery['type']} {delivery['nom']}**")
+        df = pd.DataFrame(st.session_state.livraisons)
         
-        with col2:
-            st.write(delivery['adresse'])
-        
-        with col3:
-            if st.button("❌", key=f"del_{idx}"):
-                st.session_state.deliveries.pop(idx)
-                st.rerun()
+        # Affichage avec options de modification
+        for idx, livraison in enumerate(st.session_state.livraisons):
+            with st.expander(f"**{livraison['client']}** - {livraison['adresse']}", expanded=False):
+                col1, col2, col3 = st.columns([2, 2, 1])
+                
+                with col1:
+                    st.write(f"🕐 Fenêtre : **{livraison['heure_debut']} - {livraison['heure_fin']}**")
+                    st.write(f"⏱️ Durée : **{livraison['duree']} min**")
+                
+                with col2:
+                    st.write(f"📍 Coordonnées : {livraison['lat']:.4f}, {livraison['lng']:.4f}")
+                    st.write(f"📊 Statut : {livraison['statut']}")
+                
+                with col3:
+                    if st.button("🗑️ Supprimer", key=f"del_{idx}"):
+                        st.session_state.livraisons.pop(idx)
+                        st.rerun()
     
-    st.divider()
-    
-    # Bouton d'optimisation
-    if len(st.session_state.deliveries) >= 2:
+    # ============================================================
+    # TAB 2 : CARTE INTERACTIVE
+    # ============================================================
+    with tab2:
+        st.subheader("🗺️ Carte des livraisons")
         
-        if st.button("🚀 OPTIMISER LA TOURNÉE", type="primary", use_container_width=True):
+        # Créer la carte centrée sur la Suisse
+        centre_lat = sum(l['lat'] for l in st.session_state.livraisons) / len(st.session_state.livraisons)
+        centre_lng = sum(l['lng'] for l in st.session_state.livraisons) / len(st.session_state.livraisons)
+        
+        m = folium.Map(location=[centre_lat, centre_lng], zoom_start=10)
+        
+        # Ajouter les marqueurs
+        for idx, livraison in enumerate(st.session_state.livraisons, 1):
+            folium.Marker(
+                location=[livraison['lat'], livraison['lng']],
+                popup=f"<b>{livraison['client']}</b><br>{livraison['adresse']}<br>🕐 {livraison['heure_debut']}-{livraison['heure_fin']}",
+                tooltip=f"{idx}. {livraison['client']}",
+                icon=folium.Icon(color='red', icon='info-sign', prefix='glyphicon')
+            ).add_to(m)
+        
+        # Afficher la carte
+        st_folium(m, width=700, height=500)
+        
+        # Calculer les distances entre points
+        if len(st.session_state.livraisons) >= 2:
+            st.markdown("---")
+            st.subheader("📏 Matrice des distances")
             
-            with st.spinner("🔄 Calcul de l'itinéraire optimal..."):
+            with st.spinner("Calcul des distances en cours..."):
+                # Créer la matrice des distances
+                origins = [(l['lat'], l['lng']) for l in st.session_state.livraisons]
                 
                 try:
-                    # Séparer le dépôt des clients
-                    depot = None
-                    clients = []
+                    distance_matrix = gmaps.distance_matrix(origins, origins, mode="driving")
                     
-                    for d in st.session_state.deliveries:
-                        if d['type'] == "🏢 Dépôt":
-                            depot = d['adresse']
-                        else:
-                            clients.append(d['adresse'])
+                    # Créer un DataFrame pour afficher
+                    noms = [l['client'] for l in st.session_state.livraisons]
+                    distances_km = []
                     
-                    if not depot:
-                        st.error("⚠️ Veuillez ajouter un dépôt (point de départ)")
-                        st.stop()
+                    for i, row in enumerate(distance_matrix['rows']):
+                        distances_ligne = []
+                        for j, element in enumerate(row['elements']):
+                            if element['status'] == 'OK':
+                                dist_km = element['distance']['value'] / 1000
+                                distances_ligne.append(f"{dist_km:.1f} km")
+                            else:
+                                distances_ligne.append("-")
+                        distances_km.append(distances_ligne)
                     
-                    if len(clients) == 0:
-                        st.error("⚠️ Veuillez ajouter au moins un client")
-                        st.stop()
-                    
-                    # Calculer les distances
-                    all_addresses = [depot] + clients
-                    
-                    # Créer l'URL Google Maps avec tous les points
-                    # Format: origin → waypoints → destination (retour au dépôt)
-                    
-                    origin = depot.replace(" ", "+")
-                    destination = depot.replace(" ", "+")
-                    waypoints = "|".join([addr.replace(" ", "+") for addr in clients])
-                    
-                    google_maps_url = f"https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}&waypoints={waypoints}&travelmode=driving"
-                    
-                    # Afficher le résultat
-                    st.success("✅ Tournée optimisée !")
-                    
-                    st.subheader("📍 Itinéraire")
-                    st.write(f"**1.** 🏢 Départ : {depot}")
-                    for idx, client in enumerate(clients, start=2):
-                        st.write(f"**{idx}.** 📦 {client}")
-                    st.write(f"**{len(clients) + 2}.** 🏢 Retour au dépôt")
-                    
-                    st.divider()
-                    
-                    # Bouton pour ouvrir Google Maps
-                    st.link_button(
-                        "🗺️ OUVRIR DANS GOOGLE MAPS",
-                        google_maps_url,
-                        type="primary",
-                        use_container_width=True
-                    )
-                    
-                    st.info("💡 Cliquez sur le bouton ci-dessus pour lancer la navigation")
+                    df_distances = pd.DataFrame(distances_km, index=noms, columns=noms)
+                    st.dataframe(df_distances, use_container_width=True)
                     
                 except Exception as e:
-                    st.error(f"❌ Erreur lors de l'optimisation : {str(e)}")
+                    st.error(f"❌ Erreur calcul distances : {str(e)}")
+    
+    # ============================================================
+    # TAB 3 : ANALYSE
+    # ============================================================
+    with tab3:
+        st.subheader("📊 Analyse de la tournée")
         
-    else:
-        st.info("👆 Ajoutez au moins un dépôt et un client pour optimiser")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Graphique des horaires
+            st.markdown("#### ⏰ Répartition des fenêtres horaires")
+            
+            df_horaires = pd.DataFrame(st.session_state.livraisons)
+            df_horaires['heure_debut_num'] = df_horaires['heure_debut'].apply(
+                lambda x: int(x.split(':')[0]) + int(x.split(':')[1])/60
+            )
+            
+            fig = px.bar(df_horaires, x='client', y='duree', 
+                        title="Durée par livraison",
+                        labels={'duree': 'Durée (min)', 'client': 'Client'})
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Timeline des livraisons
+            st.markdown("#### 📅 Timeline des créneaux")
+            
+            fig = go.Figure()
+            
+            for livraison in st.session_state.livraisons:
+                heure_debut = datetime.strptime(livraison['heure_debut'], "%H:%M")
+                heure_fin = datetime.strptime(livraison['heure_fin'], "%H:%M")
+                
+                fig.add_trace(go.Scatter(
+                    x=[heure_debut, heure_fin],
+                    y=[livraison['client'], livraison['client']],
+                    mode='lines+markers',
+                    name=livraison['client'],
+                    line=dict(width=10)
+                ))
+            
+            fig.update_layout(
+                title="Fenêtres horaires disponibles",
+                xaxis_title="Heure",
+                yaxis_title="Client",
+                showlegend=False
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # ============================================================
+    # TAB 4 : EXPORT
+    # ============================================================
+    with tab4:
+        st.subheader("📥 Exporter les données")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### 📄 Format CSV")
+            df_export = pd.DataFrame(st.session_state.livraisons)
+            csv = df_export.to_csv(index=False).encode('utf-8')
+            
+            st.download_button(
+                label="📥 Télécharger CSV",
+                data=csv,
+                file_name=f"tournee_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        with col2:
+            st.markdown("#### 🗺️ Lien Google Maps")
+            
+            # Créer l'URL Google Maps avec tous les points
+            waypoints = []
+            for livraison in st.session_state.livraisons:
+                waypoints.append(f"{livraison['lat']},{livraison['lng']}")
+            
+            if waypoints:
+                gmaps_url = f"https://www.google.com/maps/dir/{'/'.join(waypoints)}"
+                st.markdown(f"[🔗 Ouvrir dans Google Maps]({gmaps_url})")
+                
+                if st.button("📋 Copier le lien", use_container_width=True):
+                    st.code(gmaps_url)
 
-else:
-    st.info("👆 Ajoutez votre première livraison ci-dessus")
-
-# Footer
-st.divider()
-st.caption("💡 **Astuce** : Ajoutez d'abord votre dépôt (point de départ), puis vos clients")
-st.caption("🔄 Rafraîchissez la page pour recommencer")
-st.caption(f"⏰ Dernière mise à jour : {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+st.markdown("---")
+st.caption("💡 Application développée pour l'optimisation de tournées en Suisse")
