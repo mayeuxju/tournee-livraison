@@ -46,38 +46,65 @@ def geocoder_adresse(numero, rue, npa, ville):
     if not gmaps:
         return None, "❌ Google Maps non disponible"
     
-    # Construction de l'adresse
-    adresse_parts = []
-    if numero and rue:
-        adresse_parts.append(f"{numero} {rue}")
-    elif rue:
-        adresse_parts.append(rue)
+    # Construction de l'adresse - PLUSIEURS TENTATIVES
+    tentatives = []
     
-    if npa:
-        adresse_parts.append(str(npa))
+    # Tentative 1 : Adresse complète
+    if numero and rue and npa and ville:
+        tentatives.append(f"{rue} {numero}, {npa} {ville}, Suisse")
     
+    # Tentative 2 : Sans numéro
+    if rue and npa and ville:
+        tentatives.append(f"{rue}, {npa} {ville}, Suisse")
+    
+    # Tentative 3 : Ville + NPA seulement
+    if npa and ville:
+        tentatives.append(f"{npa} {ville}, Suisse")
+    
+    # Tentative 4 : Ville seulement
     if ville:
-        adresse_parts.append(ville)
+        tentatives.append(f"{ville}, Suisse")
     
-    if not adresse_parts:
+    if not tentatives:
         return None, "❌ Aucune information d'adresse fournie"
     
-    adresse_complete = ", ".join(adresse_parts) + ", Suisse"
-    
-    try:
-        geocode_result = gmaps.geocode(adresse_complete)
-        
-        if geocode_result:
-            location = geocode_result[0]['geometry']['location']
-            adresse_formatee = geocode_result[0]['formatted_address']
+    # Essayer chaque tentative
+    for idx, adresse in enumerate(tentatives):
+        try:
+            geocode_result = gmaps.geocode(
+                adresse,
+                components={'country': 'CH'}  # Forcer la Suisse
+            )
             
-            return {
-                'lat': location['lat'],
-                'lng': location['lng'],
-                'adresse_formatee': adresse_formatee
-            }, None
-        else:
-            return None, f"❌ Adresse introuvable : {adresse_complete}"
+            if geocode_result:
+                location = geocode_result[0]['geometry']['location']
+                adresse_formatee = geocode_result[0]['formatted_address']
+                
+                # Vérifier que c'est bien en Suisse
+                if 'Switzerland' in adresse_formatee or 'Suisse' in adresse_formatee or 'Schweiz' in adresse_formatee:
+                    return {
+                        'lat': location['lat'],
+                        'lng': location['lng'],
+                        'adresse_formatee': adresse_formatee
+                    }, None
+        
+        except Exception as e:
+            # Continuer avec la tentative suivante
+            if idx == len(tentatives) - 1:  # Dernière tentative
+                error_msg = str(e)
+                
+                # Messages d'erreur spécifiques
+                if 'OVER_QUERY_LIMIT' in error_msg:
+                    return None, "❌ Quota API Google Maps dépassé. Réessayez dans quelques minutes."
+                elif 'REQUEST_DENIED' in error_msg:
+                    return None, "❌ API Google Maps : Requête refusée. Vérifiez la configuration."
+                elif 'INVALID_REQUEST' in error_msg:
+                    return None, f"❌ Adresse invalide : {adresse}"
+                else:
+                    return None, f"❌ Erreur : {error_msg[:100]}"
+            continue
+    
+    return None, f"❌ Adresse introuvable. Tentatives : {', '.join(tentatives)}"
     
     except Exception as e:
         return None, f"❌ Erreur de géocodage : {str(e)}"
@@ -118,6 +145,23 @@ def calculer_distance(origin, destination, mode_vehicule):
         return None, None
 
 # Titre principal
+# Mode debug
+with st.sidebar:
+    st.markdown("---")
+    debug_mode = st.checkbox("🔧 Mode Debug", value=False)
+    
+    if debug_mode:
+        st.write("**État de l'application :**")
+        st.write(f"- Étape : {st.session_state.etape}")
+        st.write(f"- Véhicule : {st.session_state.vehicule}")
+        st.write(f"- Dépôt : {'✅' if st.session_state.depot else '❌'}")
+        st.write(f"- Clients : {len(st.session_state.clients)}")
+        
+        if st.button("🔄 Reset complet"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+
 st.title("🚚 Optimisation de Tournées - Suisse")
 st.markdown("---")
 
