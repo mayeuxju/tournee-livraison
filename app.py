@@ -8,8 +8,8 @@ import os # Pour potentiellement lire la clé API depuis l'environnement
 # Idéalement, mettez-la dans une variable d'environnement pour des raisons de sécurité
 # Exemple : export GOOGLE_MAPS_API_KEY='VOTRE_CLE_API'
 # Si non trouvée, vous pouvez la coller directement ici, mais ce n'est pas recommandé
-API_KEY = os.environ.get('GOOGLE_MAPS_API_KEY', 'VOTRE_CLE_API_ICI') # Remplacez si vous ne mettez pas de variable d'env
-if API_KEY == 'VOTRE_CLE_API_ICI':
+API_KEY = os.environ.get('AIzaSyA31LqMOI4B-99NCUSf1nPnpSwcWjqga4U', 'AIzaSyA31LqMOI4B-99NCUSf1nPnpSwcWjqga4U') # Remplacez si vous ne mettez pas de variable d'env
+if API_KEY == 'AIzaSyA31LqMOI4B-99NCUSf1nPnpSwcWjqga4U':
     print("ATTENTION : Clé API Google Maps non configurée. L'application ne fonctionnera pas.")
 
 gmaps = googlemaps.Client(key=API_KEY)
