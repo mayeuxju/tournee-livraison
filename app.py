@@ -10,17 +10,24 @@ st.set_page_config(page_title="Livreur Pro Suisse", layout="wide")
 
 st.markdown("""
     <style>
-    /* Bulles de la liste récapitulative (Etape 2) */
-    .summary-bubble {
-        padding: 12px;
-        border-radius: 10px;
-        margin-bottom: 10px;
+    /* Styles pour la liste d'arrêts (Résumé) */
+    .summary-box {
+        padding: 8px 15px;
+        border-radius: 8px;
+        margin-bottom: 5px;
+        display: flex;
+        align-items: center;
         color: white;
     }
-    .bubble-depot { background-color: #28a745; border-left: 5px solid #1e7e34; }
-    .bubble-client { background-color: #0047AB; border-left: 5px solid #003380; }
+    .depot-box { background-color: #28a745; } /* Vert */
+    .client-box { background-color: #0047AB; } /* Bleu */
     
-    /* Bulle bleue feuille de route (Etape 3) */
+    /* Alignement des colonnes dans la liste pour que les boutons soient bien placés */
+    [data-testid="stHorizontalBlock"] {
+        align-items: center;
+    }
+
+    /* Style de la bulle bleue client (Feuille de route) */
     .client-card {
         background-color: #0047AB;
         color: white;
@@ -37,9 +44,7 @@ st.markdown("""
     .address-box code {
         color: white !important;
         background-color: rgba(255,255,255,0.2) !important;
-        border: none !important;
     }
-    .stButton>button[kind="secondary"] { color: #ff4b4b; border-color: #ff4b4b; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -71,7 +76,7 @@ except:
     st.stop()
 
 def validate_address(n, r, npa, v):
-    query = f"{n} {r} {npa} {v}, Suisse".strip()
+    query = f"{r} {n} {npa} {v}, Suisse".strip()
     res = gmaps.geocode(query)
     if res:
         return {
@@ -94,6 +99,7 @@ if st.session_state.step == 1:
 # --- ÉTAPE 2 : CONFIGURATION TOURNÉE ---
 elif st.session_state.step == 2:
     st.title(f"📍 Configuration ({st.session_state.vehicle})")
+    
     col_form, col_map = st.columns([1, 1.2])
 
     with col_form:
@@ -120,12 +126,13 @@ elif st.session_state.step == 2:
                 st.session_state.f_t1 = ca.time_input("Pas avant", value=st.session_state.f_t1)
                 st.session_state.f_t2 = cb.time_input("Pas après", value=st.session_state.f_t2)
 
-        if st.button("✅ Enregistrer", type="primary"):
+        if st.button("✅ Enregistrer l'adresse", type="primary"):
             res = validate_address(st.session_state.f_num, st.session_state.f_rue, st.session_state.f_npa, st.session_state.f_vil)
             if res:
                 res["nom"] = "DÉPÔT" if is_depot else (st.session_state.f_nom if st.session_state.f_nom else "Client")
                 if is_depot: res["h_dep"] = st.session_state.f_hdep
                 else: res.update({"use_h": st.session_state.f_use_h, "dur": st.session_state.f_dur, "t1": st.session_state.f_t1, "t2": st.session_state.f_t2})
+                
                 if is_edit: st.session_state.stops[idx] = res
                 else: st.session_state.stops.append(res)
                 reset_form_fields()
@@ -139,32 +146,34 @@ elif st.session_state.step == 2:
                 st.session_state.step = 3
                 st.rerun()
 
-        st.subheader("📋 Récapitulatif")
+        st.subheader("📋 Liste des arrêts")
         for i, s in enumerate(st.session_state.stops):
-            # Formatage de l'adresse demandée : Rue Numéro, NPA Ville
-            display_addr = f"{s['raw']['r']} {s['raw']['n']}, {s['raw']['npa']} {s['raw']['v']}"
-            bubble_class = "bubble-depot" if i == 0 else "bubble-client"
-            icon = "🏠" if i == 0 else f"{i}."
-
-            # Création de la bulle avec HTML
-            st.markdown(f"""
-                <div class="summary-bubble {bubble_class}">
-                    <strong>{icon} {s['nom']}</strong> — {display_addr}
-                </div>
-            """, unsafe_allow_html=True)
+            color_class = "depot-box" if i == 0 else "client-box"
+            # Format Rue, Numéro, NPA, Ville
+            clean_addr = f"{s['raw']['r']} {s['raw']['n']}, {s['raw']['npa']} {s['raw']['v']}"
             
-            # Boutons sous la bulle pour rester fonctionnels
-            c_e, c_d, c_empty = st.columns([0.15, 0.15, 0.7])
-            if c_e.button("✏️", key=f"ed_{i}"):
-                st.session_state.edit_idx = i
-                st.session_state.f_nom, st.session_state.f_num = s['nom'], s['raw']['n']
-                st.session_state.f_rue, st.session_state.f_npa, st.session_state.f_vil = s['raw']['r'], s['raw']['npa'], s['raw']['v']
-                if i == 0: st.session_state.f_hdep = s['h_dep']
-                else: st.session_state.f_dur, st.session_state.f_use_h, st.session_state.f_t1, st.session_state.f_t2 = s['dur'], s['use_h'], s['t1'], s['t2']
-                st.rerun()
-            if c_d.button("🗑️", key=f"dl_{i}"):
-                st.session_state.stops.pop(i)
-                st.rerun()
+            # Affichage en une ligne avec colonnes
+            with st.container():
+                st.markdown(f'<div class="summary-box {color_class}">', unsafe_allow_html=True)
+                cols = st.columns([0.1, 0.7, 0.1, 0.1])
+                cols[0].write("🏠" if i == 0 else f"{i}")
+                cols[1].write(f"**{s['nom']}** | {clean_addr}")
+                if cols[2].button("✏️", key=f"ed_{i}"):
+                    st.session_state.edit_idx = i
+                    st.session_state.f_nom = s['nom']
+                    st.session_state.f_num = s['raw']['n']
+                    st.session_state.f_rue = s['raw']['r']
+                    st.session_state.f_npa = s['raw']['npa']
+                    st.session_state.f_vil = s['raw']['v']
+                    if i == 0: st.session_state.f_hdep = s['h_dep']
+                    else:
+                        st.session_state.f_dur, st.session_state.f_use_h = s['dur'], s['use_h']
+                        st.session_state.f_t1, st.session_state.f_t2 = s['t1'], s['t2']
+                    st.rerun()
+                if cols[3].button("🗑️", key=f"dl_{i}"):
+                    st.session_state.stops.pop(i)
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
 
     with col_map:
         m = folium.Map(location=[46.8, 8.2], zoom_start=7)
@@ -177,14 +186,16 @@ elif st.session_state.step == 3:
     st.title("🏁 Feuille de Route Optimisée")
     t_mult = 1.25 if st.session_state.vehicle == "Camion (Lourd)" else 1.0
     
-    res = gmaps.directions(st.session_state.stops[0]['full'], st.session_state.stops[0]['full'], 
-                           waypoints=[s['full'] for s in st.session_state.stops[1:]], optimize_waypoints=True)
+    origin = st.session_state.stops[0]['full']
+    destinations = [s['full'] for s in st.session_state.stops[1:]]
+    res = gmaps.directions(origin, origin, waypoints=destinations, optimize_waypoints=True)
     
     if res:
-        order, legs = res[0]['waypoint_order'], res[0]['legs']
+        order = res[0]['waypoint_order']
+        legs = res[0]['legs']
         current_time = datetime.combine(datetime.today(), st.session_state.stops[0]['h_dep'])
-        m_final = folium.Map(location=[st.session_state.stops[0]['lat'], st.session_state.stops[0]['lng']], zoom_start=10)
         
+        m_final = folium.Map(location=[st.session_state.stops[0]['lat'], st.session_state.stops[0]['lng']], zoom_start=10)
         st.info(f"🏠 **DÉPART DU DÉPÔT : {current_time.strftime('%H:%M')}**")
 
         for i, leg in enumerate(legs[:-1]):
@@ -196,8 +207,8 @@ elif st.session_state.step == 3:
             if client['use_h'] and arrival_time < datetime.combine(datetime.today(), client['t1']):
                 arrival_time = datetime.combine(datetime.today(), client['t1'])
 
-            st.markdown(f"""<div class="client-card"><h3 style="margin:0; color: white;">{i+1}. {client['nom']}</h3>
-                <p style="margin: 5px 0; opacity: 0.9;">⌚ Arrivée : <b>{arrival_time.strftime('%H:%M')}</b> | 📦 Sur place : {client['dur']} min</p></div>""", unsafe_allow_html=True)
+            # BULLE BLEUE + ADRESSE COPIABLE
+            st.markdown(f'<div class="client-card"><h3 style="margin:0; color: white;">{i+1}. {client["nom"]}</h3><p style="margin: 5px 0; opacity: 0.9;">⌚ Arrivée : <b>{arrival_time.strftime("%H:%M")}</b> | 📦 Temps : {client["dur"]} min</p></div>', unsafe_allow_html=True)
             st.markdown('<div class="address-box">', unsafe_allow_html=True)
             st.code(client['full'], language=None)
             st.markdown('</div>', unsafe_allow_html=True)
@@ -205,9 +216,11 @@ elif st.session_state.step == 3:
             folium.Marker([client['lat'], client['lng']], popup=client['nom'], icon=folium.Icon(color="blue")).add_to(m_final)
             current_time = arrival_time + timedelta(minutes=client['dur'])
 
-        folium.PolyLine(polyline.decode(res[0]['overview_polyline']['points']), color="blue", weight=5).add_to(m_final)
-        st.subheader("🗺️ Carte")
+        poly = res[0]['overview_polyline']['points']
+        folium.PolyLine(polyline.decode(poly), color="blue", weight=5).add_to(m_final)
+        st.subheader("🗺️ Carte de la tournée")
         folium_static(m_final, width=1000)
+
         if st.button("⬅️ Retour"):
             st.session_state.step = 2
             st.rerun()
