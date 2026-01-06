@@ -5,60 +5,38 @@ from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 import time as time_module
 
-st.set_page_config(page_title="Tournées 🚚 Suisse", layout="wide")
+st.set_page_config(page_title="Tournées 🚚", layout="wide")
 
-st.title("🇨🇭 Optimiseur de Tournées - Suisse")
-st.markdown("**Adresses structurées + Modification individuelle + Détection conflits**")
+st.title("🚚 Optimiseur de Tournées - Suisse")
+st.markdown("**Modification individuelle + Adresses optimisées**")
 
 # Initialiser
 if 'livraisons' not in st.session_state:
     st.session_state.livraisons = []
 if 'depot' not in st.session_state:
     st.session_state.depot = None
-if 'edit_mode' not in st.session_state:
-    st.session_state.edit_mode = None
+if 'editing_index' not in st.session_state:
+    st.session_state.editing_index = None
 
-# Base de données simplifiée des villes suisses (NPA → Ville)
-VILLES_SUISSE = {
-    # Principales villes
+geolocator = Nominatim(user_agent="delivery_optimizer_swiss_v1")
+
+# Base de données simplifiée NPA Suisse (à enrichir)
+NPA_SUISSE = {
     "1000": "Lausanne", "1003": "Lausanne", "1004": "Lausanne",
-    "1200": "Genève", "1201": "Genève", "1202": "Genève", "1203": "Genève",
-    "1204": "Genève", "1205": "Genève", "1206": "Genève", "1207": "Genève",
-    "1208": "Genève", "1209": "Genève",
-    "1400": "Yverdon-les-Bains",
-    "1530": "Payerne",
-    "1630": "Bulle",
-    "1700": "Fribourg",
-    "1800": "Vevey",
-    "1950": "Sion",
-    "2000": "Neuchâtel",
-    "2300": "La Chaux-de-Fonds",
-    "2500": "Biel/Bienne",
-    "3000": "Bern", "3001": "Bern", "3003": "Bern", "3004": "Bern",
-    "3005": "Bern", "3006": "Bern", "3007": "Bern", "3008": "Bern",
-    "3011": "Bern", "3012": "Bern", "3013": "Bern", "3014": "Bern",
-    "3015": "Bern", "3018": "Bern", "3019": "Bern",
-    "3900": "Brig",
-    "4000": "Basel", "4001": "Basel", "4002": "Basel", "4003": "Basel",
-    "4051": "Basel", "4052": "Basel", "4053": "Basel", "4054": "Basel",
-    "4055": "Basel", "4056": "Basel", "4057": "Basel", "4058": "Basel",
-    "5000": "Aarau",
-    "6000": "Luzern", "6003": "Luzern", "6004": "Luzern", "6005": "Luzern",
-    "6900": "Lugano",
-    "7000": "Chur",
-    "8000": "Zürich", "8001": "Zürich", "8002": "Zürich", "8003": "Zürich",
-    "8004": "Zürich", "8005": "Zürich", "8006": "Zürich", "8008": "Zürich",
-    "8032": "Zürich", "8037": "Zürich", "8038": "Zürich", "8041": "Zürich",
-    "8044": "Zürich", "8045": "Zürich", "8046": "Zürich", "8047": "Zürich",
-    "8048": "Zürich", "8049": "Zürich", "8050": "Zürich", "8051": "Zürich",
-    "8052": "Zürich", "8053": "Zürich", "8055": "Zürich", "8057": "Zürich",
-    "9000": "St. Gallen",
+    "1200": "Genève", "1201": "Genève", "1202": "Genève",
+    "1400": "Yverdon-les-Bains", "1630": "Bulle",
+    "1700": "Fribourg", "1800": "Vevey",
+    "2000": "Neuchâtel", "2300": "La Chaux-de-Fonds",
+    "3000": "Berne", "3001": "Berne", "3011": "Berne",
+    "4000": "Bâle", "4001": "Bâle",
+    "6000": "Lucerne", "6900": "Lugano",
+    "8000": "Zurich", "8001": "Zurich", "8002": "Zurich",
+    "9000": "Saint-Gall",
 }
 
-# Dictionnaire inversé (Ville → NPA principal)
-VILLE_TO_NPA = {v: k for k, v in VILLES_SUISSE.items()}
-
-geolocator = Nominatim(user_agent="delivery_optimizer_suisse")
+# Fonction pour obtenir la ville depuis le NPA
+def get_ville_from_npa(npa):
+    return NPA_SUISSE.get(str(npa), "")
 
 # Fonction pour convertir minutes en HH:MM
 def minutes_to_hhmm(minutes):
@@ -66,16 +44,16 @@ def minutes_to_hhmm(minutes):
     mins = minutes % 60
     return f"{hours:02d}:{mins:02d}"
 
-# Fonction pour géocoder une adresse suisse structurée
-def geocode_swiss_address(numero, rue, npa, ville):
-    address_str = f"{numero} {rue}, {npa} {ville}, Suisse"
+# Fonction pour géocoder une adresse
+def geocode_address(numero, rue, npa, ville, pays="Suisse"):
+    adresse_complete = f"{numero} {rue}, {npa} {ville}, {pays}"
     try:
-        location = geolocator.geocode(address_str, timeout=10, country_codes='ch')
+        location = geolocator.geocode(adresse_complete, timeout=10)
         if location:
-            return (location.latitude, location.longitude)
+            return (location.latitude, location.longitude), adresse_complete
     except:
         pass
-    return None
+    return None, adresse_complete
 
 # Fonction pour calculer le temps entre deux heures
 def time_diff_minutes(time1, time2):
@@ -83,7 +61,7 @@ def time_diff_minutes(time1, time2):
     dt2 = datetime.combine(datetime.today(), time2)
     return int((dt2 - dt1).total_seconds() / 60)
 
-# Fonction d'optimisation avec détection de conflits
+# Fonction d'optimisation
 def optimize_route_with_conflicts(depot_coords, deliveries, heure_depart):
     if not deliveries or not depot_coords:
         return [], []
@@ -203,198 +181,161 @@ def optimize_route_with_conflicts(depot_coords, deliveries, heure_depart):
 # ===== SECTION 1 : DÉPÔT =====
 st.header("🏭 Point de départ")
 
-col_depot = st.columns([2, 2, 2, 2, 1])
-
-with col_depot[0]:
-    depot_numero = st.text_input("N° rue", placeholder="Ex: 12", key="depot_num")
-
-with col_depot[1]:
-    depot_rue = st.text_input("Nom de rue", placeholder="Ex: Rue de Lausanne", key="depot_rue")
-
-with col_depot[2]:
-    depot_npa = st.text_input("NPA", placeholder="Ex: 1000", key="depot_npa", max_chars=4)
-    
-    # Auto-complétion NPA → Ville
-    if depot_npa and len(depot_npa) == 4:
-        if depot_npa in VILLES_SUISSE:
-            st.session_state.depot_ville_auto = VILLES_SUISSE[depot_npa]
-        else:
-            st.session_state.depot_ville_auto = ""
-    else:
-        st.session_state.depot_ville_auto = ""
-
-with col_depot[3]:
-    depot_ville = st.text_input("Ville", 
-                                placeholder="Ex: Lausanne", 
-                                value=st.session_state.get('depot_ville_auto', ''),
-                                key="depot_ville")
-
-with col_depot[4]:
-    st.markdown("####")
-    if st.button("📍", type="primary", help="Valider le dépôt"):
-        if depot_numero and depot_rue and depot_npa and depot_ville:
-            with st.spinner("🔍 Géolocalisation..."):
-                coords = geocode_swiss_address(depot_numero, depot_rue, depot_npa, depot_ville)
-                if coords:
-                    st.session_state.depot = {
-                        'numero': depot_numero,
-                        'rue': depot_rue,
-                        'npa': depot_npa,
-                        'ville': depot_ville,
-                        'coords': coords
-                    }
-                    st.success(f"✅ Dépôt : {depot_numero} {depot_rue}, {depot_npa} {depot_ville}")
-                    st.rerun()
-                else:
-                    st.error("❌ Adresse introuvable")
-        else:
-            st.error("⚠️ Remplissez tous les champs")
-
-# Afficher le dépôt + Heure de départ
 if st.session_state.depot:
-    col_info1, col_info2 = st.columns([3, 1])
+    col_info1, col_info2, col_info3 = st.columns([3, 2, 1])
     
     with col_info1:
-        st.info(f"📍 **Dépôt** : {st.session_state.depot['numero']} {st.session_state.depot['rue']}, {st.session_state.depot['npa']} {st.session_state.depot['ville']}")
+        st.info(f"📍 **Dépôt** : {st.session_state.depot['adresse']}")
     
     with col_info2:
-        if 'heure_depart' not in st.session_state:
-            st.session_state.heure_depart = datetime.strptime("08:00", "%H:%M").time()
+        st.info(f"🕐 **Départ** : {st.session_state.depot['heure_depart'].strftime('%H:%M')}")
+    
+    with col_info3:
+        if st.button("✏️ Modifier", key="edit_depot"):
+            st.session_state.depot = None
+            st.rerun()
+else:
+    with st.form("depot_form"):
+        st.subheader("Définir le dépôt")
         
-        heure_depart = st.time_input("🕐 Départ", value=st.session_state.heure_depart, key="time_depart")
-        st.session_state.heure_depart = heure_depart
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            depot_numero = st.text_input("N°", placeholder="Ex: 15")
+            depot_rue = st.text_input("Rue", placeholder="Ex: Avenue de la Gare")
+        
+        with col2:
+            depot_npa = st.text_input("NPA", placeholder="Ex: 1003", max_chars=4)
+            
+            # Auto-complétion ville
+            ville_auto = get_ville_from_npa(depot_npa) if depot_npa else ""
+            depot_ville = st.text_input("Ville", value=ville_auto, placeholder="Ex: Lausanne")
+        
+        heure_depart = st.time_input("🕐 Heure de départ", value=datetime.strptime("08:00", "%H:%M").time())
+        
+        if st.form_submit_button("📍 Valider le dépôt", type="primary", use_container_width=True):
+            if depot_numero and depot_rue and depot_npa and depot_ville:
+                with st.spinner("🔍 Géolocalisation du dépôt..."):
+                    coords, adresse = geocode_address(depot_numero, depot_rue, depot_npa, depot_ville)
+                    
+                    if coords:
+                        st.session_state.depot = {
+                            'adresse': adresse,
+                            'coords': coords,
+                            'heure_depart': heure_depart
+                        }
+                        st.success(f"✅ Dépôt enregistré : {adresse}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Adresse introuvable : {adresse}")
+            else:
+                st.error("⚠️ Remplissez tous les champs")
 
 st.divider()
 
 # ===== SECTION 2 : AJOUT/MODIFICATION LIVRAISONS =====
-if st.session_state.edit_mode is not None:
+if st.session_state.editing_index is not None:
     st.header("✏️ Modifier une livraison")
     
-    delivery = st.session_state.livraisons[st.session_state.edit_mode]
+    delivery = st.session_state.livraisons[st.session_state.editing_index]
     
     with st.form("edit_form"):
         col1, col2 = st.columns(2)
         
         with col1:
             nom = st.text_input("Client", value=delivery['Client'])
-            
-            col_addr = st.columns([1, 3])
-            with col_addr[0]:
-                numero = st.text_input("N°", value=delivery['numero'])
-            with col_addr[1]:
-                rue = st.text_input("Rue", value=delivery['rue'])
-            
-            col_cp = st.columns(2)
-            with col_cp[0]:
-                npa = st.text_input("NPA", value=delivery['npa'], max_chars=4)
-                
-                # Auto-complétion NPA → Ville
-                if npa and len(npa) == 4:
-                    if npa in VILLES_SUISSE:
-                        st.session_state.edit_ville_auto = VILLES_SUISSE[npa]
-                    else:
-                        st.session_state.edit_ville_auto = delivery['ville']
-                else:
-                    st.session_state.edit_ville_auto = delivery['ville']
-            
-            with col_cp[1]:
-                ville = st.text_input("Ville", value=st.session_state.get('edit_ville_auto', delivery['ville']))
+            numero = st.text_input("N°", value=delivery['numero'])
+            rue = st.text_input("Rue", value=delivery['rue'])
         
         with col2:
-            st.markdown("**Créneau horaire (optionnel)**")
-            col_time1, col_time2 = st.columns(2)
-            with col_time1:
-                creneau_debut = st.time_input("De", value=delivery['creneau_debut'], key="edit_debut")
-            with col_time2:
-                creneau_fin = st.time_input("À", value=delivery['creneau_fin'], key="edit_fin")
-            
-            duree_manutention = st.number_input("Temps manutention (min)", 
-                                               min_value=0, 
-                                               value=delivery['duree_manutention'] or 0,
-                                               help="Laissez à 0 pour 10 min par défaut")
+            npa = st.text_input("NPA", value=delivery['npa'], max_chars=4)
+            ville_auto = get_ville_from_npa(npa) if npa else delivery['ville']
+            ville = st.text_input("Ville", value=ville_auto)
         
-        col_btn = st.columns(2)
-        with col_btn[0]:
+        st.markdown("**Créneau horaire (optionnel)**")
+        col_time1, col_time2, col_time3 = st.columns(3)
+        
+        with col_time1:
+            creneau_debut = st.time_input("De", value=delivery['creneau_debut'], key="edit_debut")
+        with col_time2:
+            creneau_fin = st.time_input("À", value=delivery['creneau_fin'], key="edit_fin")
+        with col_time3:
+            duree_manutention = st.number_input("Manutention (min)", min_value=0, 
+                                               value=delivery['duree_manutention'] or 0)
+        
+        col_btn1, col_btn2 = st.columns(2)
+        
+        with col_btn1:
             if st.form_submit_button("💾 Enregistrer", type="primary", use_container_width=True):
                 if nom and numero and rue and npa and ville:
-                    with st.spinner("🔍 Géolocalisation..."):
-                        coords = geocode_swiss_address(numero, rue, npa, ville)
+                    with st.spinner("🔍 Mise à jour..."):
+                        coords, adresse = geocode_address(numero, rue, npa, ville)
                         
                         if coords:
-                            st.session_state.livraisons[st.session_state.edit_mode] = {
+                            st.session_state.livraisons[st.session_state.editing_index] = {
                                 'Client': nom,
                                 'numero': numero,
                                 'rue': rue,
                                 'npa': npa,
                                 'ville': ville,
+                                'Adresse': adresse,
                                 'creneau_debut': creneau_debut,
                                 'creneau_fin': creneau_fin,
                                 'duree_manutention': duree_manutention if duree_manutention > 0 else None,
                                 'coords': coords
                             }
-                            st.session_state.edit_mode = None
+                            st.session_state.editing_index = None
+                            # Supprimer la tournée optimisée
                             if 'route_optimized' in st.session_state:
                                 del st.session_state.route_optimized
+                            if 'conflicts' in st.session_state:
+                                del st.session_state.conflicts
                             st.success("✅ Livraison modifiée")
                             st.rerun()
                         else:
-                            st.error("❌ Adresse introuvable")
+                            st.error(f"❌ Adresse introuvable : {numero} {rue}, {npa} {ville}")
+                else:
+                    st.error("⚠️ Remplissez tous les champs")
         
-        with col_btn[1]:
+        with col_btn2:
             if st.form_submit_button("❌ Annuler", use_container_width=True):
-                st.session_state.edit_mode = None
+                st.session_state.editing_index = None
                 st.rerun()
-
+    
 else:
     st.header("📦 Ajouter une livraison")
-
+    
     with st.form("ajout_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
         
         with col1:
-            nom = st.text_input("Client", placeholder="Ex: Client A")
-            
-            col_addr = st.columns([1, 3])
-            with col_addr[0]:
-                numero = st.text_input("N° rue", placeholder="Ex: 45")
-            with col_addr[1]:
-                rue = st.text_input("Nom de rue", placeholder="Ex: Avenue de la Gare")
-            
-            col_cp = st.columns(2)
-            with col_cp[0]:
-                npa = st.text_input("NPA", placeholder="Ex: 1000", max_chars=4, key="npa_input")
-                
-                # Auto-complétion NPA → Ville
-                if npa and len(npa) == 4:
-                    if npa in VILLES_SUISSE:
-                        st.session_state.ville_auto = VILLES_SUISSE[npa]
-                    else:
-                        st.session_state.ville_auto = ""
-                else:
-                    st.session_state.ville_auto = ""
-            
-            with col_cp[1]:
-                ville = st.text_input("Ville", 
-                                     placeholder="Ex: Lausanne",
-                                     value=st.session_state.get('ville_auto', ''),
-                                     key="ville_input")
+            nom = st.text_input("Client", placeholder="Ex: Restaurant du Port")
+            numero = st.text_input("N°", placeholder="Ex: 25")
+            rue = st.text_input("Rue", placeholder="Ex: Rue de Lausanne")
         
         with col2:
-            st.markdown("**Créneau horaire (optionnel)**")
-            col_time1, col_time2 = st.columns(2)
-            with col_time1:
-                creneau_debut = st.time_input("De", value=None, key="debut", help="Laissez vide si pas de contrainte")
-            with col_time2:
-                creneau_fin = st.time_input("À", value=None, key="fin", help="Laissez vide si pas de contrainte")
+            npa = st.text_input("NPA", placeholder="Ex: 1003", max_chars=4)
             
-            duree_manutention = st.number_input("Temps manutention (min)", min_value=0, value=0, 
+            # Auto-complétion ville
+            ville_auto = get_ville_from_npa(npa) if npa else ""
+            ville = st.text_input("Ville", value=ville_auto, placeholder="Ex: Lausanne")
+        
+        st.markdown("**Créneau horaire (optionnel)**")
+        col_time1, col_time2, col_time3 = st.columns(3)
+        
+        with col_time1:
+            creneau_debut = st.time_input("De", value=None, key="debut", help="Laissez vide si pas de contrainte")
+        with col_time2:
+            creneau_fin = st.time_input("À", value=None, key="fin", help="Laissez vide si pas de contrainte")
+        with col_time3:
+            duree_manutention = st.number_input("Manutention (min)", min_value=0, value=0, 
                                                help="Laissez à 0 pour 10 min par défaut")
         
         if st.form_submit_button("➕ Ajouter la livraison", type="primary", use_container_width=True):
             if nom and numero and rue and npa and ville:
                 with st.spinner("🔍 Géolocalisation..."):
                     time_module.sleep(0.5)
-                    coords = geocode_swiss_address(numero, rue, npa, ville)
+                    coords, adresse = geocode_address(numero, rue, npa, ville)
                     
                     if coords:
                         st.session_state.livraisons.append({
@@ -403,19 +344,23 @@ else:
                             'rue': rue,
                             'npa': npa,
                             'ville': ville,
+                            'Adresse': adresse,
                             'creneau_debut': creneau_debut,
                             'creneau_fin': creneau_fin,
                             'duree_manutention': duree_manutention if duree_manutention > 0 else None,
                             'coords': coords
                         })
+                        # Supprimer la tournée optimisée si elle existe
                         if 'route_optimized' in st.session_state:
                             del st.session_state.route_optimized
+                        if 'conflicts' in st.session_state:
+                            del st.session_state.conflicts
                         st.success(f"✅ {nom} ajouté")
                         st.rerun()
                     else:
                         st.error(f"❌ Adresse introuvable : {numero} {rue}, {npa} {ville}")
             else:
-                st.error("⚠️ Remplissez tous les champs d'adresse")
+                st.error("⚠️ Remplissez au moins : Client, N°, Rue, NPA, Ville")
 
 st.divider()
 
@@ -427,17 +372,15 @@ if st.session_state.livraisons:
     col_btn1, col_btn2 = st.columns(2)
     
     with col_btn1:
-        if st.button("🚀 OPTIMISER LA TOURNÉE", type="primary", use_container_width=True):
+        if st.button("🚀 OPTIMISER LA TOURNÉE", type="primary", use_container_width=True, disabled=not st.session_state.depot):
             if not st.session_state.depot:
                 st.error("❌ Définissez d'abord le dépôt !")
-            elif 'heure_depart' not in st.session_state:
-                st.error("❌ Définissez l'heure de départ !")
             else:
                 with st.spinner("⏳ Optimisation en cours..."):
                     route, conflicts = optimize_route_with_conflicts(
                         st.session_state.depot['coords'],
                         st.session_state.livraisons,
-                        st.session_state.heure_depart
+                        st.session_state.depot['heure_depart']
                     )
                     st.session_state.route_optimized = route
                     st.session_state.conflicts = conflicts
@@ -448,12 +391,11 @@ if st.session_state.livraisons:
         if st.button("🗑️ Tout effacer", use_container_width=True):
             st.session_state.livraisons = []
             st.session_state.depot = None
+            st.session_state.editing_index = None
             if 'route_optimized' in st.session_state:
                 del st.session_state.route_optimized
             if 'conflicts' in st.session_state:
                 del st.session_state.conflicts
-            if 'heure_depart' in st.session_state:
-                del st.session_state.heure_depart
             st.rerun()
     
     # Affichage des conflits
@@ -494,12 +436,10 @@ if st.session_state.livraisons:
             if latence and latence > 15:
                 latence_display = f"⏳ {minutes_to_hhmm(latence)}"
             
-            adresse_complete = f"{delivery['numero']} {delivery['rue']}, {delivery['npa']} {delivery['ville']}"
-            
             route_data.append({
                 'N°': i,
                 'Client': delivery['Client'],
-                'Adresse': adresse_complete,
+                'Adresse': delivery['Adresse'],
                 'Créneau': creneau_str,
                 'Arrivée': delivery['heure_arrivee'].strftime('%H:%M'),
                 'Latence': latence_display if latence_display else "—",
@@ -537,7 +477,7 @@ if st.session_state.livraisons:
             st.metric("⏱️ Durée totale", minutes_to_hhmm(duree_totale))
         
         # Heure de fin estimée
-        heure_fin = datetime.combine(datetime.today(), st.session_state.heure_depart) + timedelta(minutes=duree_totale)
+        heure_fin = datetime.combine(datetime.today(), st.session_state.depot['heure_depart']) + timedelta(minutes=duree_totale)
         st.info(f"🏁 **Retour estimé au dépôt** : {heure_fin.strftime('%H:%M')}")
         
         # Export Google Maps
@@ -558,46 +498,48 @@ if st.session_state.livraisons:
             st.download_button("📥 Télécharger CSV", csv, "tournee_optimisee.csv", "text/csv", use_container_width=True)
         
     else:
-        # Affichage liste simple (non optimisée) avec boutons modifier
-        for idx, d in enumerate(st.session_state.livraisons):
-            col1, col2, col3 = st.columns([5, 3, 1])
+        # Affichage liste simple (non optimisée) avec actions
+        st.markdown("### 📋 Livraisons non optimisées")
+        
+        for i, delivery in enumerate(st.session_state.livraisons):
+            col1, col2, col3 = st.columns([5, 1, 1])
             
             with col1:
-                st.write(f"**{d['Client']}**")
-                st.caption(f"{d['numero']} {d['rue']}, {d['npa']} {d['ville']}")
+                creneau = ""
+                if delivery['creneau_debut'] and delivery['creneau_fin']:
+                    creneau = f" | 🕐 {delivery['creneau_debut'].strftime('%H:%M')}-{delivery['creneau_fin'].strftime('%H:%M')}"
+                elif delivery['creneau_debut']:
+                    creneau = f" | 🕐 Après {delivery['creneau_debut'].strftime('%H:%M')}"
+                elif delivery['creneau_fin']:
+                    creneau = f" | 🕐 Avant {delivery['creneau_fin'].strftime('%H:%M')}"
+                
+                manut = f" | ⏱️ {minutes_to_hhmm(delivery['duree_manutention'] or 10)}"
+                
+                st.write(f"**{i+1}. {delivery['Client']}**  \n{delivery['Adresse']}{creneau}{manut}")
             
             with col2:
-                creneau_text = ""
-                if d['creneau_debut'] and d['creneau_fin']:
-                    creneau_text = f"🕐 {d['creneau_debut'].strftime('%H:%M')}-{d['creneau_fin'].strftime('%H:%M')}"
-                elif d['creneau_debut']:
-                    creneau_text = f"🕐 Après {d['creneau_debut'].strftime('%H:%M')}"
-                elif d['creneau_fin']:
-                    creneau_text = f"🕐 Avant {d['creneau_fin'].strftime('%H:%M')}"
-                else:
-                    creneau_text = "🕐 Pas de créneau"
-                
-                st.write(creneau_text)
-                manut = d['duree_manutention'] or 10
-                st.caption(f"📦 Manutention: {minutes_to_hhmm(manut)}")
+                if st.button("✏️", key=f"edit_{i}", help="Modifier", use_container_width=True):
+                    st.session_state.editing_index = i
+                    st.rerun()
             
             with col3:
-                if st.button("✏️", key=f"edit_{idx}", help="Modifier"):
-                    st.session_state.edit_mode = idx
-                    st.rerun()
-                
-                if st.button("🗑️", key=f"del_{idx}", help="Supprimer"):
-                    st.session_state.livraisons.pop(idx)
+                if st.button("🗑️", key=f"delete_{i}", help="Supprimer", use_container_width=True):
+                    st.session_state.livraisons.pop(i)
                     if 'route_optimized' in st.session_state:
                         del st.session_state.route_optimized
+                    if 'conflicts' in st.session_state:
+                        del st.session_state.conflicts
                     st.rerun()
             
             st.divider()
         
-        st.warning("⚠️ Cliquez sur **OPTIMISER** pour calculer l'itinéraire optimal")
+        if not st.session_state.depot:
+            st.warning("⚠️ Définissez d'abord le **dépôt** pour pouvoir optimiser")
+        else:
+            st.info("👆 Cliquez sur **OPTIMISER** pour calculer l'itinéraire optimal")
 
 else:
-    st.info("👆 Commencez par définir le dépôt et l'heure de départ, puis ajoutez des livraisons")
+    st.info("👆 Commencez par définir le dépôt, puis ajoutez des livraisons")
 
 st.divider()
-st.caption("🇨🇭 **Optimisé pour la Suisse** | Vitesse moyenne : 60 km/h | Autocomplétion NPA ↔ Ville")
+st.caption("💡 **Astuce** : Tapez le NPA et la ville se remplit automatiquement. Vous pouvez la modifier si nécessaire.")
