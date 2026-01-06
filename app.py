@@ -1,194 +1,180 @@
 import streamlit as st
 import googlemaps
-import pandas as pd
 import folium
 from streamlit_folium import folium_static
 from datetime import datetime, timedelta
-import plotly.express as px
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Livreur Pro Suisse", layout="wide")
+st.set_page_config(page_title="Tournée Pro Suisse", layout="wide", initial_sidebar_state="collapsed")
 
-# --- STYLE CSS ---
+# --- CSS PERSONNALISÉ (Mobile & Design) ---
 st.markdown("""
     <style>
-    .latency-line {
-        border-left: 4px solid #28a745;
-        margin: 0px 0px 0px 35px;
-        padding: 10px 0px 10px 25px;
-        color: #28a745; font-weight: bold; font-size: 0.9em;
+    body { font-size: 14px; }
+    .stButton>button { width: 100%; border-radius: 8px; }
+    .status-ok { color: #28a745; font-weight: bold; }
+    .summary-card { 
+        background: #f8f9fa; border-radius: 10px; padding: 10px; 
+        margin-bottom: 10px; border-left: 5px solid #1f77b4;
     }
-    .stop-card {
-        background: white; padding: 15px; border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.05); border-left: 5px solid #1f77b4;
-        margin-bottom: 5px;
-    }
-    .stButton>button { width: 100%; }
+    .edit-btn { font-size: 0.8em; color: #1f77b4; cursor: pointer; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- INITIALISATION SESSION STATE ---
+# --- INITIALISATION ---
 if 'stops' not in st.session_state:
-    st.session_state.stops = [] # Liste des adresses
+    st.session_state.stops = []
 if 'step' not in st.session_state:
     st.session_state.step = 1
+if 'edit_idx' not in st.session_state:
+    st.session_state.edit_idx = None
 
-# API Google
+# Connexion Google Maps
 try:
     gmaps = googlemaps.Client(key=st.secrets["google"]["api_key"])
 except:
-    st.error("Configurez votre clé API Google dans les Secrets.")
+    st.error("Clé API manquante dans les secrets.")
     st.stop()
 
-# --- FONCTIONS UTILES ---
-def format_address(n, r, npa, v):
-    """Combine les champs pour Google Maps"""
-    parts = [n, r, npa, v]
-    return " ".join([str(p) for p in parts if p]).strip()
-
-def get_lat_lng(addr):
-    """Vérifie si l'adresse existe et renvoie les coordonnées"""
-    res = gmaps.geocode(addr)
+# --- LOGIQUE DE VALIDATION D'ADRESSE ---
+def validate_address(n, r, npa, v):
+    query = f"{n} {r} {npa} {v}, Suisse".strip()
+    res = gmaps.geocode(query)
     if res:
-        return res[0]['geometry']['location'], res[0]['formatted_address']
-    return None, None
+        addr_comp = res[0]['address_components']
+        # Extraction intelligente pour compléter les champs vides
+        found_npa = next((c['short_name'] for c in addr_comp if 'postal_code' in c['types']), npa)
+        found_ville = next((c['long_name'] for c in addr_comp if 'locality' in c['types']), v)
+        return {
+            "full": res[0]['formatted_address'],
+            "lat": res[0]['geometry']['location']['lat'],
+            "lng": res[0]['geometry']['location']['lng'],
+            "npa": found_npa,
+            "ville": found_ville,
+            "raw": {"n":n, "r":r, "npa":npa, "v":v}
+        }
+    return None
 
-# --- WORKFLOW PAR ÉTAPES ---
+# --- UI : RÉSUMÉ EN BAS DE PAGE ---
+def render_summary():
+    if st.session_state.stops:
+        st.write("---")
+        st.subheader("📍 Étapes de la tournée")
+        for i, stop in enumerate(st.session_state.stops):
+            col1, col2, col3 = st.columns([0.1, 0.7, 0.2])
+            with col1:
+                st.write(f"**{i+1}**")
+            with col2:
+                label = "🏠 DÉPÔT" if i == 0 else f"👤 Client {i}"
+                st.markdown(f"**{label}** : {stop['full']} <span class='status-ok'>✅</span>", unsafe_allow_html=True)
+                if 'time_window' in stop:
+                    st.caption(f"Fenêtre: {stop['time_window'][0]} - {stop['time_window'][1]} | {stop['duration']}min")
+            with col3:
+                if st.button("Modifier", key=f"edit_{i}"):
+                    st.session_state.edit_idx = i
+                    st.rerun()
+        
+        # Carte dynamique
+        m = folium.Map(location=[st.session_state.stops[0]['lat'], st.session_state.stops[0]['lng']], zoom_start=10)
+        for i, s in enumerate(st.session_state.stops):
+            folium.Marker([s['lat'], s['lng']], popup=s['full'], tooltip=f"Étape {i+1}").add_to(m)
+        folium_static(m, width=700)
 
-# ÉTAPE 1 : VÉHICULE
+# --- WORKFLOW ---
+
+# ETAPE 1 : VEHICULE
 if st.session_state.step == 1:
-    st.title("Step 1 : Catégorie de véhicule")
-    vehicule = st.selectbox("Choisissez votre véhicule", ["Voiture / Utilitaire léger", "Poids Lourd (Vitesse réduite)"])
-    st.session_state.vehicule_type = vehicule
-    if st.button("Suivant ➡️"):
+    st.title("1. Catégorie de véhicule")
+    v_type = st.radio("Type de transport", ["Voiture", "Poids Lourd"])
+    if st.button("Continuer"):
+        st.session_state.vehicule = v_type
         st.session_state.step = 2
         st.rerun()
 
-# ÉTAPE 2 : DÉPÔT (DÉPART)
+# ETAPE 2 : DEPÔT ET CLIENTS
 elif st.session_state.step == 2:
-    st.title("Step 2 : Point de départ (Dépôt)")
-    col1, col2, col3, col4 = st.columns([1,3,1,2])
-    n = col1.text_input("N°")
-    r = col2.text_input("Rue")
-    npa = col3.text_input("NPA")
-    v = col4.text_input("Ville")
+    is_editing = st.session_state.edit_idx is not None
+    idx = st.session_state.edit_idx
     
-    dep_time = st.time_input("Heure de départ du dépôt", datetime.now().replace(hour=8, minute=0))
+    title = "🏠 Modifier Dépôt" if idx == 0 else ("👤 Modifier Client" if is_editing else "➕ Ajouter un Client")
+    st.title(title)
     
-    if st.button("Valider le dépôt ➡️"):
-        full_addr = format_address(n, r, npa, v)
-        loc, clean_addr = get_lat_lng(full_addr)
-        if loc:
-            st.session_state.stops = [{
-                "type": "Dépôt",
-                "address": clean_addr,
-                "lat": loc['lat'], "lng": loc['lng'],
-                "time_window": (dep_time, dep_time),
-                "duration": 0
-            }]
-            st.session_state.step = 3
+    # Pré-remplissage si édition
+    prev = st.session_state.stops[idx]['raw'] if is_editing else {"n":"","r":"","npa":"","v":""}
+    
+    with st.container():
+        c1, c2, c3, c4 = st.columns([1,3,1,2])
+        num = c1.text_input("N°", prev['n'])
+        rue = c2.text_input("Rue", prev['r'])
+        npa = c3.text_input("NPA", prev['npa'])
+        vil = c4.text_input("Ville", prev['v'])
+        
+        if idx == 0 or (not is_editing and len(st.session_state.stops) == 0):
+            st.session_state.dep_time = st.time_input("Heure de départ du dépôt", datetime.now().replace(hour=8, minute=0))
+        else:
+            col_t1, col_t2, col_dur = st.columns(3)
+            t1 = col_t1.time_input("Début fenêtre", datetime.now().replace(hour=8, minute=0))
+            t2 = col_t2.time_input("Fin fenêtre", datetime.now().replace(hour=18, minute=0))
+            dur = col_dur.number_input("Temps sur place (min)", 15)
+
+    col_btn1, col_btn2 = st.columns(2)
+    
+    if col_btn1.button("✅ Valider l'adresse"):
+        data = validate_address(num, rue, npa, vil)
+        if data:
+            if not is_editing:
+                if idx == 0: data["type"] = "Dépôt"
+                else: 
+                    data["type"] = "Client"
+                    data["time_window"] = (t1, t2)
+                    data["duration"] = dur
+                st.session_state.stops.append(data)
+            else:
+                # Mise à jour
+                st.session_state.stops[idx].update(data)
+                st.session_state.edit_idx = None
+            st.success("Adresse validée et ajoutée !")
             st.rerun()
         else:
-            st.error("Adresse introuvable. Modifiez vos champs.")
-
-# ÉTAPE 3 : AJOUT DES CLIENTS
-elif st.session_state.step == 3:
-    st.title("Step 3 : Liste des clients")
-    
-    with st.expander("➕ Ajouter un client", expanded=True):
-        c1, c2, c3, c4 = st.columns([1,3,1,2])
-        cn = c1.text_input("N°", key="cn")
-        cr = c2.text_input("Rue", key="cr")
-        cnpa = c3.text_input("NPA", key="cnpa")
-        cv = c4.text_input("Ville", key="cv")
-        
-        col_t1, col_t2, col_dur = st.columns(3)
-        t_start = col_t1.time_input("Début fenêtre", datetime.now().replace(hour=9, minute=0))
-        t_end = col_t2.time_input("Fin fenêtre", datetime.now().replace(hour=18, minute=0))
-        dur = col_dur.number_input("Temps sur place (min)", value=15)
-        
-        if st.button("Ajouter à la tournée"):
-            addr = format_address(cn, cr, cnpa, cv)
-            loc, clean_addr = get_lat_lng(addr)
-            if loc:
-                st.session_state.stops.append({
-                    "type": "Client",
-                    "address": clean_addr,
-                    "lat": loc['lat'], "lng": loc['lng'],
-                    "time_window": (t_start, t_end),
-                    "duration": dur,
-                    "raw": {"n":cn, "r":cr, "npa":cnpa, "v":cv} # Sauvegarde pour modif
-                })
-                st.success(f"Ajouté : {clean_addr}")
-            else:
-                st.error("Adresse non reconnue. Corrigez les champs ci-dessus.")
-
-    # Affichage de la liste actuelle
-    st.subheader(f"Ma tournée ({len(st.session_state.stops)-1} clients)")
-    for i, s in enumerate(st.session_state.stops):
-        if i == 0: continue
-        col_list, col_del = st.columns([0.9, 0.1])
-        col_list.info(f"**{i}.** {s['address']} | 🕒 {s['time_window'][0]} - {s['time_window'][1]}")
-        if col_del.button("❌", key=f"del_{i}"):
-            st.session_state.stops.pop(i)
-            st.rerun()
+            st.error("⚠️ Adresse introuvable. Vérifiez les champs.")
 
     if len(st.session_state.stops) > 1:
-        if st.button("🏁 OPTIMISER ET GÉNÉRER LA TOURNÉE"):
-            st.session_state.step = 4
+        if st.button("🚀 OPTIMISER LA TOURNÉE"):
+            st.session_state.step = 3
             st.rerun()
 
-# ÉTAPE 4 : RÉSULTATS
-elif st.session_state.step == 4:
-    st.title("📊 Feuille de Route Optimisée")
+    render_summary()
+
+# ETAPE 3 : RÉSULTATS
+elif st.session_state.step == 3:
+    st.title("🏁 Votre Feuille de Route")
     
-    # Calcul des trajets (simplifié pour l'exemple, peut être étendu avec OR-Tools)
-    itinerary = []
-    current_time = datetime.combine(datetime.today(), st.session_state.stops[0]['time_window'][0])
-    
-    v_factor = 0.8 if st.session_state.vehicule_type == "Poids Lourd" else 1.0
+    # Logique de calcul simplifiée (Itinéraire direct entre points saisis)
+    current_time = datetime.combine(datetime.today(), st.session_state.dep_time)
+    v_factor = 0.8 if st.session_state.vehicule == "Poids Lourd" else 1.0
     
     for i in range(len(st.session_state.stops) - 1):
-        origin = st.session_state.stops[i]
-        dest = st.session_state.stops[i+1]
+        s1 = st.session_state.stops[i]
+        s2 = st.session_state.stops[i+1]
         
-        res = gmaps.directions(origin['address'], dest['address'], mode="driving", departure_time=datetime.now())
+        # Affichage du point actuel
+        st.markdown(f"<div class='summary-card'>📍 **{s1['full']}**</div>", unsafe_allow_html=True)
         
+        # Calcul vers le prochain
+        res = gmaps.directions(s1['full'], s2['full'], mode="driving")
         if res:
             leg = res[0]['legs'][0]
-            dur_sec = (leg['duration']['value'] / v_factor)
-            dist_txt = leg['distance']['text']
+            dur_min = (leg['duration']['value'] / 60) / v_factor
             
-            # Temps de trajet
-            travel_time = timedelta(seconds=int(dur_sec))
-            arrival_time = current_time + travel_time
+            # Ligne de latence (Vert si > 15min de battement ou simple trajet)
+            st.markdown(f"<div style='border-left: 3px solid #28a745; margin-left: 20px; padding: 10px;'>🚚 Trajet : {int(dur_min)} min ({leg['distance']['text']})</div>", unsafe_allow_html=True)
             
-            itinerary.append({
-                "from": origin['address'],
-                "to": dest['address'],
-                "dist": dist_txt,
-                "dur": str(travel_time),
-                "arrival": arrival_time.strftime("%H:%M")
-            })
-            # Temps passé chez le client
-            current_time = arrival_time + timedelta(minutes=dest['duration'])
+            arrival = current_time + timedelta(minutes=dur_min)
+            current_time = arrival + timedelta(minutes=s2.get('duration', 0))
+            
+            if i == len(st.session_state.stops) - 2:
+                st.markdown(f"<div class='summary-card'>🏁 **ARRIVÉE : {s2['full']}**<br>🕒 Heure estimée : {arrival.strftime('%H:%M')}</div>", unsafe_allow_html=True)
 
-    # AFFICHAGE
-    tab1, tab2 = st.tabs(["📝 Itinéraire", "🗺️ Carte"])
-    
-    with tab1:
-        st.markdown(f'<div class="stop-card">🏠 **DÉPART DÉPÔT** : {st.session_state.stops[0]["address"]} <br> 🕒 Départ à {st.session_state.stops[0]["time_window"][0]}</div>', unsafe_allow_html=True)
-        
-        for item in itinerary:
-            st.markdown(f'<div class="latency-line">🚚 Trajet : {item["dur"]} ({item["dist"]})</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="stop-card">📍 **ARRIVÉE** : {item["to"]} <br> 🕒 Heure estimée : **{item["arrival"]}**</div>', unsafe_allow_html=True)
-
-    with tab2:
-        m = folium.Map(location=[st.session_state.stops[0]['lat'], st.session_state.stops[0]['lng']], zoom_start=12)
-        for s in st.session_state.stops:
-            folium.Marker([s['lat'], s['lng']], popup=s['address']).add_to(m)
-        folium_static(m)
-
-    if st.button("🔄 Recommencer / Modifier"):
-        st.session_state.step = 3
+    if st.button("⬅️ Modifier la liste"):
+        st.session_state.step = 2
         st.rerun()
