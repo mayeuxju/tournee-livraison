@@ -4,8 +4,7 @@ from streamlit_folium import folium_static
 import folium
 from datetime import datetime, timedelta
 import polyline
-import time
-import random # Pour la partie aléatoire du crash-test précédent
+import time # Ce module était là dans votre code, je le garde par précaution
 
 # --- CONFIGURATION & STYLE ---
 st.set_page_config(page_title="Livreur Pro Suisse", layout="wide")
@@ -18,813 +17,414 @@ st.markdown("""
     [data-testid="stHorizontalBlock"] { align-items: center; }
     .client-card { background-color: #0047AB; color: white; padding: 15px; border-radius: 10px 10px 0 0; margin-top: 10px; }
     .address-box { background-color: #0047AB; padding: 0 15px 10px 15px; border-radius: 0 0 10px 10px; margin-bottom: 10px; }
-    .address-box code { color: white !important; background-color: transparent !important; font-weight: bold;}
-    .address-box p { margin-bottom: 5px; font-size: 0.9rem; }
-    .stButton>button { width: 100%; }
-    .info-box { background-color: #f0f2f6; padding: 10px; border-radius: 5px; margin-bottom: 10px; border: 1px solid #ddd; }
-    .waiting-text { color: #FFC107; font-weight: bold; }
-    .error-text { color: #DC3545; font-weight: bold; }
+    .address-box code { color: white !important; background-color: rgba(255,255,255,0.2) !important; border: none !important; }
+    .badge { padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; margin-left: 10px; background: rgba(255,255,255,0.2); }
+    .info-box { background-color: #f0f2f6; border-left: 5px solid #0047AB; padding: 5px 10px; margin-bottom: 10px; border-radius: 0 5px 5px 0;}
     </style>
     """, unsafe_allow_html=True)
 
-# --- INITIALISATION DES SESSIONS STATES ---
-if 'clients' not in st.session_state:
-    st.session_state.clients = []
-if 'depot' not in st.session_state:
-    st.session_state.depot = None
-if 'step' not in st.session_state:
-    st.session_state.step = 1
-if 'max_wait_time' not in st.session_state:
-    st.session_state.max_wait_time = 15 # Max 15 minutes d'attente acceptables
+# --- INITIALISATION ---
+if 'stops' not in st.session_state: st.session_state.stops = []
+if 'step' not in st.session_state: st.session_state.step = 1
+if 'vehicle' not in st.session_state: st.session_state.vehicle = "Voiture"
+if 'edit_idx' not in st.session_state: st.session_state.edit_idx = None
+if 'algo' not in st.session_state: st.session_state.algo = "Logique Chauffeur (Aller -> Retour)" # Valeur par défaut
 
-# --- API GOOGLE MAPS ---
-# Assurez-vous que la clé API est correctement configurée dans vos secrets Streamlit
+def reset_form_fields():
+    # Reset pour un nouveau dépôt ou client
+    st.session_state.f_nom = ""
+    st.session_state.f_num = ""
+    st.session_state.f_rue = ""
+    st.session_state.f_npa = ""
+    st.session_state.f_vil = ""
+    st.session_state.f_type = "Livraison" # Défaut pour nouveau client
+    st.session_state.f_dur = 15 # Défaut pour nouveau client
+    st.session_state.f_use_h = False # Défaut pour nouveau client
+    st.session_state.f_t1 = datetime.strptime("08:00", "%H:%M").time() # Défaut pour nouveau client
+    st.session_state.f_t2 = datetime.strptime("18:00", "%H:%M").time() # Défaut pour nouveau client
+    st.session_state.f_hdep = datetime.strptime("08:00", "%H:%M").time() # Défaut pour le dépôt
+    st.session_state.f_consider_as_delivery = False # Nouveau champ pour ramasse
+    st.session_state.edit_idx = None
+
+# Initialiser les champs du formulaire si absents (pour éviter les erreurs sur la première exécution)
+if 'f_nom' not in st.session_state: reset_form_fields()
+
 try:
+    # Votre ligne API spécifique ici
     gmaps = googlemaps.Client(key=st.secrets["google"]["api_key"])
 except Exception as e:
-    st.error(f"Erreur lors de l'initialisation de l'API Google Maps. Vérifiez votre clé API. {e}")
+    st.error(f"⚠️ Clé API Google manquante ou invalide. Vérifiez votre fichier secrets.toml. Erreur: {e}")
     st.stop()
 
-# --- FONCTIONS UTILITAIRES ---
-
-def geocode_address(address_str):
+def validate_address(n, r, npa, v):
+    # Fonction pour valider et récupérer les coordonnées d'une adresse
+    query = f"{r} {n} {npa} {v}, Suisse".strip()
     try:
-        geocode_result = gmaps.geocode(address_str)
-        if geocode_result:
-            location = geocode_result[0]['geometry']['location']
-            return location['lat'], location['lng']
-        else:
-            return None, None
-    except Exception as e:
-        st.warning(f"Erreur de géocodage pour '{address_str}': {e}")
-        return None, None
-
-def get_directions(origin, destination, mode="driving", departure_time=None):
-    try:
-        directions_result = gmaps.directions(origin, destination, mode=mode, departure_time=departure_time)
-        if directions_result:
-            return directions_result
-        else:
-            return None
-    except Exception as e:
-        st.warning(f"Erreur lors de l'appel API Directions: {e}")
-        return None
-
-def format_address(npa, ville, rue):
-    return f"{rue}, {npa} {ville}"
-
-def get_travel_time(origin_latlng, dest_latlng, departure_time=None):
-    try:
-        # Utilisation de distance_matrix pour obtenir le temps de trajet le plus précis
-        # Note: Google Maps Distance Matrix API peut avoir des coûts associés
-        # Pour une version gratuite ou limitée, on peut se rabattre sur `directions` mais c'est moins optimal pour les matrices
-        
-        # Alternative plus simple et souvent suffisante avec `directions` pour 2 points
-        origin_str = f"{origin_latlng[0]},{origin_latlng[1]}"
-        destination_str = f"{dest_latlng[0]},{dest_latlng[1]}"
-        
-        res = gmaps.directions(origin_str, destination_str, mode="driving", departure_time=departure_time)
+        res = gmaps.geocode(query)
         if res:
-            duration_seconds = res[0]['legs'][0]['duration']['value']
-            return duration_seconds
-        return None
+            full_addr = res[0]['formatted_address']
+            display_addr = full_addr.replace(", Suisse", "").replace(", Switzerland", "")
+            return {
+                "full": full_addr, "display": display_addr,
+                "lat": res[0]['geometry']['location']['lat'],
+                "lng": res[0]['geometry']['location']['lng'],
+                "raw": {"n":n, "r":r, "npa":npa, "v":v} # Stocke les entrées brutes pour ré-édition facile
+            }
     except Exception as e:
-        st.warning(f"Erreur pour calculer le temps de trajet: {e}")
-        return None
+        st.warning(f"Impossible de géocoder l'adresse '{query}': {e}")
+    return None
 
-def calculate_route_optimization(clients_data, depot, mode="driving", departure_time_dt=None):
-    if not clients_data:
-        return [], None, None, None
-
-    # Préparation des données avec coordonnées
-    processed_clients = []
-    for client in clients_data:
-        lat, lng = geocode_address(format_address(client['npa'], client['ville'], client['rue']))
-        if lat and lng:
-            processed_clients.append({
-                **client,
-                'lat': lat,
-                'lng': lng,
-                'latlng': (lat, lng)
-            })
-        else:
-            st.warning(f"Impossible de géocoder l'adresse de {client['nom']}. Ce client sera ignoré pour l'optimisation.")
-
-    if not processed_clients:
-        st.error("Aucun client n'a pu être géocodé. Impossible de calculer la tournée.")
-        return [], None, None, None
-
-    # --- LOGIQUE D'ORGANISATION DE LA TOURNEE ---
-    
-    # Séparation des missions : Livraisons, Ramasses, et Ramasses cachées comme livraisons
-    deliveries = []
-    pickups = []
-    hidden_pickups_as_deliveries = [] # Nouvel état pour ramasses cachées
-
-    for client in processed_clients:
-        if client['type'] == 'Livraison':
-            deliveries.append(client)
-        elif client['type'] == 'Ramasse':
-            if client.get('consider_as_delivery_for_calc', False): # Nouvelle logique pour ramasse cachée
-                hidden_pickups_as_deliveries.append(client)
-            else:
-                pickups.append(client)
-
-    # Combinaison des livraisons et des ramasses cachées pour la phase "aller"
-    aller_stops = sorted(deliveries + hidden_pickups_as_deliveries, key=lambda x: x.get('order_priority', float('inf'))) # Priorité manuelle si définie
-    retour_stops = sorted(pickups, key=lambda x: x.get('order_priority', float('inf'))) # Priorité manuelle si définie
-
-    final_ordered_stops = []
-    current_time = departure_time_dt
-    total_distance = 0
-    total_duration = 0
-    wait_time_total = 0
-    
-    current_location = depot['latlng']
-
-    # --- PHASE 1 : ALLER (Livraisons + Ramasses cachées) ---
-    
-    # Tri basé sur le mode choisi
-    if mode == "driving": # Mode "Mathématique" (Google Maps)
-        # Pour le mode "driving", on laisse Google gérer le plus court chemin pour tous les arrêts
-        # On ajoute temporairement les arrêts retour pour que l'API calcule le chemin global le plus court
-        all_stops_for_gmaps = aller_stops + retour_stops
-        
-        if not all_stops_for_gmaps:
-            st.info("Aucun arrêt à planifier.")
-            return [], None, None, None
-
-        # Utilisation de l'API Directions pour obtenir l'itinéraire optimisé par Google
-        waypoint_locations = [f"{c['lat']},{c['lng']}" for c in all_stops_for_gmaps]
-        
-        # On doit construire l'origine et la destination pour l'API
-        origin_point = f"{depot['lat']},{depot['lng']}"
-        
-        # Le problème ici est que l'API `directions` ne renvoie pas directement l'ordre optimisé pour PLUSIEURS WAYPOINTS
-        # Elle renvoie le chemin le plus court *si on passe dans l'ordre spécifié*.
-        # Pour obtenir l'ordre optimisé, il faut utiliser l'API `directions` en mode `optimize_waypoints=True`
-        # Mais cela nécessite de passer les waypoints et d'obtenir un nouvel ordre.
-        
-        # Solution de contournement : on va calculer les temps entre tous les points
-        # pour simuler une optimisation "approximative" si optimize_waypoints n'est pas directement dispo ou trop complexe ici.
-        # La VRAIE optimisation d'ordre est une résolution du TSP (Traveling Salesperson Problem), ce qui est complexe.
-        # Pour l'instant, avec `mode="driving"`, on va juste tracer le chemin tel que l'utilisateur l'a entré en priorité.
-        # Si l'utilisateur VEUT l'optimisation d'ordre, c'est le mode "Logique Chauffeur".
-        
-        # Pour simplifier, dans le mode "driving", on va garder l'ordre d'entrée des livraisons et des ramasses.
-        # On va calculer les temps de trajet et les ajouter à la liste `final_ordered_stops`.
-        
-        ordered_points_for_calc = [depot['latlng']] + [c['latlng'] for c in aller_stops] + [c['latlng'] for c in retour_stops]
-        
-        # Calcul du trajet global pour le mode "driving" sans réordonnancement par l'API
-        # On prend l'ordre tel qu'il a été entré et on calcule les trajets
-        
-        legs = []
-        
-        # Trajet Dépôt -> Premier client
-        leg_info = get_directions(f"{depot['lat']},{depot['lng']}", f"{aller_stops[0]['lat']},{aller_stops[0]['lng']}", mode="driving", departure_time=int(departure_time_dt.timestamp()) if departure_time_dt else None)
-        if leg_info:
-            legs.append(leg_info[0])
-            total_distance += leg_info[0]['legs'][0]['distance']['value']
-            total_duration += leg_info[0]['legs'][0]['duration']['value']
-            
-        # Trajets entre clients (livraisons)
-        for i in range(len(aller_stops) - 1):
-            leg_info = get_directions(f"{aller_stops[i]['lat']},{aller_stops[i]['lng']}", f"{aller_stops[i+1]['lat']},{aller_stops[i+1]['lng']}", mode="driving")
-            if leg_info:
-                legs.append(leg_info[0])
-                total_distance += leg_info[0]['legs'][0]['distance']['value']
-                total_duration += leg_info[0]['legs'][0]['duration']['value']
-
-        # Trajet dernier client (livraison) -> Premier client (ramasse)
-        first_pickup_dest = f"{retour_stops[0]['lat']},{retour_stops[0]['lng']}" if retour_stops else None
-        last_delivery_origin = f"{aller_stops[-1]['lat']},{aller_stops[-1]['lng']}"
-        
-        if first_pickup_dest:
-            leg_info = get_directions(last_delivery_origin, first_pickup_dest, mode="driving")
-            if leg_info:
-                legs.append(leg_info[0])
-                total_distance += leg_info[0]['legs'][0]['distance']['value']
-                total_duration += leg_info[0]['legs'][0]['duration']['value']
-        
-        # Trajets entre clients (ramasses)
-        for i in range(len(retour_stops) - 1):
-            leg_info = get_directions(f"{retour_stops[i]['lat']},{retour_stops[i]['lng']}", f"{retour_stops[i+1]['lat']},{retour_stops[i+1]['lng']}", mode="driving")
-            if leg_info:
-                legs.append(leg_info[0])
-                total_distance += leg_info[0]['legs'][0]['distance']['value']
-                total_duration += leg_info[0]['legs'][0]['duration']['value']
-
-        # Trajet dernier client (ramasse) -> Dépôt (si besoin, mais pas dans ce mode)
-        # Ici, on ne calcule pas le retour au dépôt dans le mode "driving" optimisé d'office
-        
-        # Reconstitution de la liste triée pour l'affichage
-        final_ordered_stops = aller_stops + retour_stops
-        
-        # Calcul des temps d'arrivée et de service pour chaque arrêt
-        current_time = departure_time_dt
-        
-        for i, client in enumerate(final_ordered_stops):
-            # Temps de trajet vers ce client
-            if i == 0: # Premier client
-                origin_coords = depot['latlng']
-            else:
-                origin_coords = final_ordered_stops[i-1]['latlng']
-
-            # On cherche le leg correspondant dans notre liste `legs`
-            # C'est un peu laborieux sans une structure de données plus adaptée
-            # Une manière simple est de recalculer le trajet pour chaque étape
-            
-            # Recalculer le temps de trajet pour chaque étape (peut être lent si beaucoup de points)
-            travel_duration_secs = None
-            if i == 0:
-                # Dépôt -> 1er client
-                res_leg = gmaps.directions(f"{depot['lat']},{depot['lng']}", f"{client['lat']},{client['lng']}", mode="driving", departure_time=int(current_time.timestamp()) if current_time else None)
-            else:
-                # Client précédent -> Client actuel
-                res_leg = gmaps.directions(f"{final_ordered_stops[i-1]['lat']},{final_ordered_stops[i-1]['lng']}", f"{client['lat']},{client['lng']}", mode="driving", departure_time=int(current_time.timestamp()) if current_time else None)
-
-            if res_leg:
-                travel_duration_secs = res_leg[0]['legs'][0]['duration']['value']
-                # On utilise le temps de trajet "optimisé" par Google Maps ici pour la durée
-                # Le temps total de la tournée devra être recalculé plus bas avec les legs réels.
-                
-                # Calcul de l'heure d'arrivée estimée AVANT le trajet actuel
-                arrival_at_client = current_time + timedelta(seconds=travel_duration_secs)
-                
-                # Gestion des contraintes horaires (fenêtres)
-                wait_time = 0
-                if client.get('heure_debut_fenetre') and client.get('heure_fin_fenetre'):
-                    earliest_arrival = datetime.combine(departure_time_dt.date(), client['heure_debut_fenetre'])
-                    latest_arrival = datetime.combine(departure_time_dt.date(), client['heure_fin_fenetre'])
-                    
-                    # Si j'arrive avant la fenêtre, j'attends
-                    if arrival_at_client < earliest_arrival:
-                        wait_time = (earliest_arrival - arrival_at_client).total_seconds()
-                        # On vérifie si le temps d'attente est acceptable
-                        if wait_time > st.session_state.max_wait_time * 60:
-                            client['status'] = f"Attente > {st.session_state.max_wait_time} min ({wait_time/60:.0f} min)"
-                            client['status_class'] = "waiting-text"
-                        else:
-                            client['status'] = f"Arrivée en avance ({wait_time/60:.0f} min d'attente)"
-                            client['status_class'] = "waiting-text"
-                        arrival_at_client = earliest_arrival # Mon heure réelle de service commence à la fenêtre
-                    
-                    # Si j'arrive après la fenêtre, c'est un problème (pour l'instant on affiche)
-                    elif arrival_at_client > latest_arrival:
-                        client['status'] = "En retard !"
-                        client['status_class'] = "error-text"
-                    else:
-                        client['status'] = "Dans la fenêtre horaire"
-                        client['status_class'] = ""
-                    
-                    wait_time_total += wait_time
-                    
-                else: # Pas de contrainte horaire spécifique
-                    client['status'] = ""
-                    client['status_class'] = ""
-
-                # Temps de service (durée de la mission)
-                service_duration = timedelta(minutes=client['dur'])
-                current_time = arrival_at_client + service_duration # Mise à jour pour le prochain client
-                
-                client['heure_arrivee_estimee'] = arrival_at_client.strftime("%H:%M")
-                client['heure_depart_estimee'] = current_time.strftime("%H:%M")
-                client['temps_attente_sec'] = wait_time
-                client['temps_trajet_secs'] = travel_duration_secs
-                
-                final_ordered_stops[i] = client # Update the client dict
-            else:
-                client['heure_arrivee_estimee'] = "N/A"
-                client['heure_depart_estimee'] = "N/A"
-                client['status'] = "Erreur itinéraire"
-                client['status_class'] = "error-text"
-                
-        # Calculer le temps total de la tournée (incluant service et attentes)
-        if final_ordered_stops:
-            total_duration_secs = (current_time - departure_time_dt).total_seconds()
-            
-            # Recalculer la distance totale avec les legs réels
-            total_distance_actual = sum(leg['legs'][0]['distance']['value'] for leg in legs)
-            total_duration_actual = sum(leg['legs'][0]['duration']['value'] for leg in legs) + sum(c.get('temps_attente_sec', 0) for c in final_ordered_stops) + sum(timedelta(minutes=c['dur']).total_seconds() for c in final_ordered_stops)
-            
-            return final_ordered_stops, total_distance_actual, total_duration_actual, wait_time_total
-        else:
-            return [], 0, 0, 0
-
-    elif mode == "logic_chauffeur":
-        # --- PHASE 1 : ALLER (Livraisons + Ramasses cachées) ---
-        # On trie les arrêts d'aller pour qu'ils soient du plus proche au plus loin (simplifié par défaut)
-        # On pourrait affiner cela en calculant les distances réelles au dépôt
-        
-        # Ici, on laisse Google Maps ordonnancer les waypoints pour l'aller (le plus court chemin entre ces points)
-        if aller_stops:
-            waypoint_locations_aller = [f"{c['lat']},{c['lng']}" for c in aller_stops]
-            
-            # On utilise `directions` avec optimize_waypoints
-            # Note: optimize_waypoints n'est pas disponible pour tous les modes de transport et peut avoir des limitations
-            # Dans notre cas, on va simuler en prenant le trajet le plus long et en le divisant en segments.
-            # La vraie optimisation d'ordre pour plusieurs points est complexe (TSP)
-            
-            # On va trier les points d'aller en fonction de leur distance au dépôt pour une logique "aller" simple
-            # Calcul des distances au dépôt
-            for client in aller_stops:
-                dist = geodesic(depot['latlng'], client['latlng']).km
-                client['distance_to_depot'] = dist
-            
-            # Tri basé sur la distance au dépôt (du plus proche au plus loin)
-            aller_stops_sorted = sorted(aller_stops, key=lambda x: x['distance_to_depot'])
-
-            # Calculer l'itinéraire pour les arrêts d'aller
-            ordered_route_aller = []
-            current_time_aller = departure_time_dt
-            
-            for i, client in enumerate(aller_stops_sorted):
-                if i == 0:
-                    origin_coords = depot['latlng']
-                else:
-                    origin_coords = aller_stops_sorted[i-1]['latlng']
-                
-                # On utilise l'API Directions pour obtenir les détails du segment
-                res_leg = gmaps.directions(f"{origin_coords[0]},{origin_coords[1]}", f"{client['lat']},{client['lng']}", mode="driving", departure_time=int(current_time_aller.timestamp()) if current_time_aller else None)
-                
-                if res_leg:
-                    leg_data = res_leg[0]['legs'][0]
-                    travel_duration_secs = leg_data['duration']['value']
-                    travel_distance_m = leg_data['distance']['value']
-                    
-                    total_distance += travel_distance_m
-                    total_duration += travel_duration_secs
-
-                    arrival_at_client = current_time_aller + timedelta(seconds=travel_duration_secs)
-                    
-                    wait_time = 0
-                    # Gestion des contraintes horaires
-                    if client.get('heure_debut_fenetre') and client.get('heure_fin_fenetre'):
-                        earliest_arrival = datetime.combine(departure_time_dt.date(), client['heure_debut_fenetre'])
-                        latest_arrival = datetime.combine(departure_time_dt.date(), client['heure_fin_fenetre'])
-                        
-                        if arrival_at_client < earliest_arrival:
-                            wait_time = (earliest_arrival - arrival_at_client).total_seconds()
-                            if wait_time > st.session_state.max_wait_time * 60:
-                                client['status'] = f"Attente > {st.session_state.max_wait_time} min ({wait_time/60:.0f} min)"
-                                client['status_class'] = "waiting-text"
-                            else:
-                                client['status'] = f"Arrivée en avance ({wait_time/60:.0f} min d'attente)"
-                                client['status_class'] = "waiting-text"
-                            arrival_at_client = earliest_arrival
-                        elif arrival_at_client > latest_arrival:
-                            client['status'] = "En retard !"
-                            client['status_class'] = "error-text"
-                        else:
-                            client['status'] = "Dans la fenêtre horaire"
-                            client['status_class'] = ""
-                        wait_time_total += wait_time
-                    else:
-                        client['status'] = ""
-                        client['status_class'] = ""
-
-                    service_duration = timedelta(minutes=client['dur'])
-                    current_time_aller = arrival_at_client + service_duration
-                    
-                    client['heure_arrivee_estimee'] = arrival_at_client.strftime("%H:%M")
-                    client['heure_depart_estimee'] = current_time_aller.strftime("%H:%M")
-                    client['temps_attente_sec'] = wait_time
-                    client['temps_trajet_secs'] = travel_duration_secs
-                    
-                    ordered_route_aller.append(client)
-                else:
-                    client['status'] = "Erreur itinéraire"
-                    client['status_class'] = "error-text"
-                    ordered_route_aller.append(client) # Ajouter quand même pour affichage
-
-            final_ordered_stops.extend(ordered_route_aller)
-            current_time = current_time_aller # Mise à jour du temps global
-            current_location = aller_stops_sorted[-1]['latlng'] if aller_stops_sorted else depot['latlng']
-
-        # --- PHASE 2 : RETOUR (Ramasses) ---
-        # On trie les arrêts de retour pour qu'ils soient du plus loin au plus proche du DÉPÔT
-        # Ou plutôt, du plus loin au plus proche de la DERNIÈRE LOCALISATION de l'aller
-        
-        if retour_stops:
-            # Calculer les distances au dépôt pour trier le retour (du plus loin au plus près)
-            for client in retour_stops:
-                dist = geodesic(depot['latlng'], client['latlng']).km
-                client['distance_to_depot'] = dist
-            
-            # Tri basé sur la distance au dépôt (du plus loin au plus proche)
-            # C'est le principe "retour au bercail"
-            retour_stops_sorted = sorted(retour_stops, key=lambda x: x['distance_to_depot'], reverse=True)
-            
-            # Calculer l'itinéraire pour les arrêts de retour
-            current_location_retour = current_location # Commence là où l'aller s'est terminé
-
-            for i, client in enumerate(retour_stops_sorted):
-                # On utilise l'API Directions pour obtenir les détails du segment
-                res_leg = gmaps.directions(f"{current_location_retour[0]},{current_location_retour[1]}", f"{client['lat']},{client['lng']}", mode="driving", departure_time=int(current_time.timestamp()) if current_time else None)
-                
-                if res_leg:
-                    leg_data = res_leg[0]['legs'][0]
-                    travel_duration_secs = leg_data['duration']['value']
-                    travel_distance_m = leg_data['distance']['value']
-                    
-                    total_distance += travel_distance_m
-                    total_duration += travel_duration_secs
-
-                    arrival_at_client = current_time + timedelta(seconds=travel_duration_secs)
-                    
-                    wait_time = 0
-                    # Gestion des contraintes horaires (même pour les ramasses si spécifié, mais moins courant)
-                    if client.get('heure_debut_fenetre') and client.get('heure_fin_fenetre'):
-                        earliest_arrival = datetime.combine(departure_time_dt.date(), client['heure_debut_fenetre'])
-                        latest_arrival = datetime.combine(departure_time_dt.date(), client['heure_fin_fenetre'])
-                        
-                        if arrival_at_client < earliest_arrival:
-                            wait_time = (earliest_arrival - arrival_at_client).total_seconds()
-                            if wait_time > st.session_state.max_wait_time * 60:
-                                client['status'] = f"Attente > {st.session_state.max_wait_time} min ({wait_time/60:.0f} min)"
-                                client['status_class'] = "waiting-text"
-                            else:
-                                client['status'] = f"Arrivée en avance ({wait_time/60:.0f} min d'attente)"
-                                client['status_class'] = "waiting-text"
-                            arrival_at_client = earliest_arrival
-                        elif arrival_at_client > latest_arrival:
-                            client['status'] = "En retard !"
-                            client['status_class'] = "error-text"
-                        else:
-                            client['status'] = "Dans la fenêtre horaire"
-                            client['status_class'] = ""
-                        wait_time_total += wait_time
-                    else:
-                        client['status'] = ""
-                        client['status_class'] = ""
-                        
-                    service_duration = timedelta(minutes=client['dur'])
-                    current_time = arrival_at_client + service_duration
-                    
-                    client['heure_arrivee_estimee'] = arrival_at_client.strftime("%H:%M")
-                    client['heure_depart_estimee'] = current_time.strftime("%H:%M")
-                    client['temps_attente_sec'] = wait_time
-                    client['temps_trajet_secs'] = travel_duration_secs
-                    
-                    final_ordered_stops.append(client)
-                    current_location_retour = client['latlng'] # MAJ pour le prochain segment
-                else:
-                    client['status'] = "Erreur itinéraire"
-                    client['status_class'] = "error-text"
-                    final_ordered_stops.append(client) # Ajouter quand même
-
-        # Calculer le temps total de la tournée (incluant service et attentes)
-        if final_ordered_stops:
-            total_duration_secs = (current_time - departure_time_dt).total_seconds()
-            
-            # On calcule la distance et durée totales à partir des segments calculés
-            # Note: ceci ne prend pas en compte le retour au dépôt après la dernière ramasse.
-            # Il faudrait ajouter un dernier appel à `get_directions` si le retour au dépôt est nécessaire.
-            
-            return final_ordered_stops, total_distance, total_duration + wait_time_total, wait_time_total
-        else:
-            return [], 0, 0, 0
-
-    else: # Mode par défaut ou inconnue, utilise l'ordre d'entrée
-        return [], 0, 0, 0
-
-# --- NAVIGATION ENTRE LES ÉTAPES ---
-
-def show_depot_form():
-    st.header("🏁 1. Votre Dépôt de Départ")
-    with st.form("depot_form", clear_on_submit=True):
-        depot_nom = st.text_input("Nom du dépôt (ex: Entrepôt principal)")
-        depot_rue = st.text_input("Rue et numéro")
-        depot_npa = st.text_input("NPA (code postal)")
-        depot_ville = st.text_input("Ville")
-        depot_heure = st.time_input("Heure de départ", datetime.now().time())
-        
-        if st.form_submit_button("Valider le dépôt et continuer"):
-            if depot_nom and depot_rue and depot_npa and depot_ville:
-                full_address = format_address(depot_npa, depot_ville, depot_rue)
-                lat, lng = geocode_address(full_address)
-                if lat and lng:
-                    st.session_state.depot = {
-                        'nom': depot_nom,
-                        'rue': depot_rue,
-                        'npa': depot_npa,
-                        'ville': depot_ville,
-                        'full_address': full_address,
-                        'lat': lat,
-                        'lng': lng,
-                        'latlng': (lat, lng),
-                        'heure_depart': depot_heure
-                    }
-                    st.session_state.step = 2
-                    st.rerun()
-                else:
-                    st.error("Impossible de géocoder l'adresse du dépôt. Veuillez vérifier l'adresse.")
-            else:
-                st.error("Veuillez remplir tous les champs du dépôt.")
-
-def show_client_form():
-    st.header("📦 2. Vos Clients / Points de Passage")
-    st.write("Ajoutez vos arrêts. Le type 'Livraison' sera priorisé à l'aller, 'Ramasse' au retour.")
-    
-    # Affichage du dépôt et de l'heure de départ pour rappel
-    if st.session_state.depot:
-        st.info(f"**Dépôt :** {st.session_state.depot['nom']} ({st.session_state.depot['full_address']})<br>**Heure de départ :** {st.session_state.depot['heure_depart'].strftime('%H:%M')}", unsafe_allow_html=True)
-
-    with st.form("client_form", clear_on_submit=True):
-        client_nom = st.text_input("Nom du client / Point de passage")
-        client_rue = st.text_input("Rue et numéro")
-        client_npa = st.text_input("NPA (code postal)")
-        client_ville = st.text_input("Ville")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            client_type = st.selectbox("Type de mission", ["Livraison", "Ramasse"], index=0)
-        with col2:
-            client_dur = st.number_input("Durée estimée (min)", min_value=1, value=15)
-        with col3:
-            # Nouvelle option pour les ramasses
-            consider_as_delivery_for_calc = False
-            if client_type == "Ramasse":
-                consider_as_delivery_for_calc = st.checkbox("Considérer comme Livraison (pour calcul)", help="Force ce point à être traité durant la phase 'aller' par l'algorithme, même si c'est une ramasse.")
-        
-        st.subheader("Contraintes (Optionnel)")
-        col4, col5 = st.columns(2)
-        with col4:
-            heure_debut_fenetre = st.time_input("Début fenêtre horaire", None)
-        with col5:
-            heure_fin_fenetre = st.time_input("Fin fenêtre horaire", None)
-            
-        # Champ pour force l'ordre (option avancée)
-        order_priority = st.number_input("Priorité d'ordre manuelle (plus bas = plus tôt)", min_value=0, value=999, step=1, format="%d")
-        
-        if st.form_submit_button("Ajouter l'arrêt"):
-            if client_nom and client_rue and client_npa and client_ville:
-                
-                # Convertir les heures en format utilisable
-                h_debut = heure_debut_fenetre if heure_debut_fenetre != datetime.now().time() else None
-                h_fin = heure_fin_fenetre if heure_fin_fenetre != datetime.now().time() else None
-
-                st.session_state.clients.append({
-                    'nom': client_nom,
-                    'rue': client_rue,
-                    'npa': client_npa,
-                    'ville': client_ville,
-                    'type': client_type,
-                    'dur': client_dur,
-                    'heure_debut_fenetre': h_debut,
-                    'heure_fin_fenetre': h_fin,
-                    'consider_as_delivery_for_calc': consider_as_delivery_for_calc,
-                    'order_priority': order_priority
-                })
-            else:
-                st.error("Veuillez remplir tous les champs obligatoires pour le client.")
-
-    st.subheader("Liste des arrêts saisis :")
-    if not st.session_state.clients:
-        st.info("Aucun arrêt n'a encore été ajouté.")
-    else:
-        # Affichage des clients avec possibilité de suppression
-        cols_display = st.columns([0.1, 0.3, 0.3, 0.1, 0.1, 0.1]) # Ajuster les largeurs si besoin
-        cols_display[0].markdown("**#**")
-        cols_display[1].markdown("**Client**")
-        cols_display[2].markdown("**Adresse**")
-        cols_display[3].markdown("**Type**")
-        cols_display[4].markdown("**Durée**")
-        cols_display[5].markdown("**Actions**")
-        
-        for i, client in enumerate(st.session_state.clients):
-            cols_display = st.columns([0.1, 0.3, 0.3, 0.1, 0.1, 0.1])
-            cols_display[0].text(str(i+1))
-            cols_display[1].text(client['nom'])
-            cols_display[2].text(f"{client['npa']} {client['ville']}, {client['rue']}")
-            
-            type_display = client['type']
-            if client['type'] == 'Ramasse' and client.get('consider_as_delivery_for_calc'):
-                type_display += " (Calc. Liv.)"
-                
-            cols_display[3].text(type_display)
-            cols_display[4].text(f"{client['dur']} min")
-            
-            # Bouton de suppression
-            if cols_display[5].button("❌", key=f"del_{i}"):
-                del st.session_state.clients[i]
-                st.rerun() # Rafraîchir pour mettre à jour la liste
-
-    st.markdown("---")
-    
-    col_mode, col_wait = st.columns(2)
-    with col_mode:
-        st.session_state.optimization_mode = st.radio(
-            "Mode d'optimisation",
-            ("Driving (Google Maps)", "Logique Chauffeur (Aller/Retour)"),
-            index=1 if 'optimization_mode' not in st.session_state or st.session_state.optimization_mode == "Logique Chauffeur (Aller/Retour)" else 0,
-            horizontal=True
-        )
-        # Mapping pour le backend
-        if st.session_state.optimization_mode == "Driving (Google Maps)":
-            backend_mode = "driving"
-        else:
-            backend_mode = "logic_chauffeur"
-
-    with col_wait:
-        st.session_state.max_wait_time = st.slider("Temps d'attente maximal toléré (min)", min_value=0, max_value=30, value=st.session_state.max_wait_time, step=5)
-
-    if st.button("🚀 Calculer la tournée optimisée"):
-        if st.session_state.depot and st.session_state.clients:
-            st.session_state.step = 3
-            st.rerun()
-        else:
-            st.warning("Veuillez définir votre dépôt et ajouter au moins un client pour calculer la tournée.")
-
-def show_optimization_results():
-    st.header("🚀 Tournée Optimisée")
-
-    if not st.session_state.depot or not st.session_state.clients:
-        st.warning("Données de dépôt ou de clients manquantes. Retour à l'étape précédente.")
-        st.session_state.step = 1
-        st.rerun()
-
-    # Définir le mode d'optimisation
-    mode = "driving" if st.session_state.optimization_mode == "Driving (Google Maps)" else "logic_chauffeur"
-
-    # Préparer l'heure de départ au format datetime
-    depot_info = st.session_state.depot
-    current_date = datetime.now().date()
-    departure_time_dt = datetime.combine(current_date, depot_info['heure_depart'])
-
-    # Calcul de l'optimisation
-    ordered_clients, total_distance_m, total_duration_secs, total_wait_time_secs = calculate_route_optimization(
-        st.session_state.clients,
-        st.session_state.depot,
-        mode=mode,
-        departure_time_dt=departure_time_dt
-    )
-
-    # Affichage des résultats globaux
-    col_summary1, col_summary2, col_summary3 = st.columns(3)
-    col_summary1.metric("Distance totale", f"{total_distance_m / 1000:.1f} km")
-    
-    total_duration_mins = total_duration_secs / 60
-    hours = int(total_duration_mins // 60)
-    minutes = int(total_duration_mins % 60)
-    col_summary2.metric("Durée totale estimée", f"{hours}h{minutes:02d}")
-    
-    col_summary3.metric("Temps d'attente total", f"{total_wait_time_secs / 60:.0f} min")
-    
-    st.markdown("---")
-
-    # --- Affichage de la carte ---
-    st.subheader("🗺️ Carte de la tournée")
-    m_final = folium.Map(location=st.session_state.depot['latlng'], zoom_start=12)
-    
-    # Marqueur pour le dépôt
-    folium.Marker(
-        st.session_state.depot['latlng'],
-        popup=f"<b>Dépôt:</b> {st.session_state.depot['nom']}<br>{st.session_state.depot['full_address']}",
-        icon=folium.Icon(color="green", icon="home")
-    ).add_to(m_final)
-
-    # Si on a des données ordonnées pour construire les segments
-    if ordered_clients:
-        # Calculer les coordonnées pour chaque segment
-        path_coords = [st.session_state.depot['latlng']]
-        
-        for i, client in enumerate(ordered_clients):
-            start_location = path_coords[-1] # Dernière position enregistrée
-            end_location = (client['lat'], client['lng'])
-
-            # Récupérer le chemin réel entre le point de départ et d'arrivée pour ce segment
-            # Utilisation de l'API Directions pour avoir le polyline et les détails du segment
-            try:
-                # Il faut spécifier departure_time pour le premier segment, puis on le met à None pour les suivants car le temps réel est déjà calculé
-                departure_time_arg = int(departure_time_dt.timestamp()) if i == 0 else None
-                
-                # IMPORTANT: Si le mode est "logic_chauffeur", on a déjà calculé les legs dans `calculate_route_optimization`
-                # Il faudrait stocker ces legs pour les réutiliser ici, sinon on fait des appels API redondants
-                
-                # Pour l'instant, on refait un appel API pour simplifier le code.
-                # Si la performance est un problème, il faut stocker les `res_leg` retournés par `calculate_route_optimization`
-                
-                res_leg = gmaps.directions(
-                    f"{start_location[0]},{start_location[1]}",
-                    f"{end_location[0]},{end_location[1]}",
-                    mode="driving", # Toujours driving pour le polyline
-                    departure_time=departure_time_arg # Utiliser le temps de départ si c'est le premier segment
-                )
-                
-                if res_leg:
-                    leg = res_leg[0]['legs'][0]
-                    # Ajouter les coordonnées du segment au chemin global
-                    points = polyline.decode(res_leg[0]['overview_polyline']['points'])
-                    path_coords.extend(points) # Ajoute les points du segment
-
-                    # Affichage du marqueur et du popup pour le client
-                    folium.Marker(
-                        end_location,
-                        popup=folium.Popup(
-                            f"""
-                            <b>{client['nom']}</b><br>
-                            {client['npa']} {client['ville']}, {client['rue']}<br>
-                            <hr style='margin: 5px 0;'>
-                            Type: {client['type']}<br>
-                            Durée: {client['dur']} min<br>
-                            <span class="{client.get('status_class', '')}">{client.get('status', '')}</span><br>
-                            Arr: {client.get('heure_arrivee_estimee', 'N/A')}<br>
-                            Dep: {client.get('heure_depart_estimee', 'N/A')}<br>
-                            Trajet: {leg['distance']['text']} ({leg['duration']['text']})
-                            """,
-                            max_width=300
-                        ),
-                        icon=folium.Icon(color="blue") # La couleur peut être changée selon le type (Livraison/Ramasse)
-                    ).add_to(m_final)
-                    
-                    # On met à jour `path_coords` avec la localisation du client actuel
-                    path_coords.append(end_location)
-            
-            except Exception as e:
-                st.error(f"Erreur lors du tracé du segment de la carte : {e}")
-
-        # Tracer le polyline de la tournée
-        if len(path_coords) > 1:
-            folium.PolyLine(path_coords, color="blue", weight=5, opacity=0.7).add_to(m_final)
-            
-        folium_static(m_final, width=1000)
-    
-    else:
-        st.warning("Aucun itinéraire n'a pu être généré.")
-
-    # --- Affichage détaillé des arrêts ---
-    st.subheader("📋 Détail des arrêts")
-    if not ordered_clients:
-        st.info("Aucun arrêt à afficher.")
-    else:
-        for i, client in enumerate(ordered_clients):
-            full_address = format_address(client['npa'], client['ville'], client['rue'])
-            
-            # Préparation des informations de contraintes à afficher
-            constraints_html = ""
-            if client.get('heure_debut_fenetre') and client.get('heure_fin_fenetre'):
-                constraints_html += f"<p>Fenêtre Horaire: {client['heure_debut_fenetre'].strftime('%H:%M')} - {client['heure_fin_fenetre'].strftime('%H:%M')}</p>"
-            
-            constraints_html += f"<p>Durée estimée: {client['dur']} min</p>"
-            
-            if client.get('status'):
-                constraints_html += f"<p class='{client.get('status_class', '')}'>Statut: {client['status']}</p>"
-            
-            if client.get('temps_attente_sec', 0) > 0:
-                 constraints_html += f"<p>Temps d'attente: {client['temps_attente_sec']/60:.0f} min</p>"
-            
-            if client.get('temps_trajet_secs'):
-                secs = client['temps_trajet_secs']
-                mins = secs // 60
-                secs_rem = secs % 60
-                constraints_html += f"<p>Trajet (vers ce point): {mins} min {secs_rem} s</p>"
-
-            client_display_type = client['type']
-            if client.get('consider_as_delivery_for_calc'):
-                client_display_type += " (Calc. Liv.)"
-
-            # Affichage de la carte pour chaque client (simplifié, juste pour la visualisation rapide)
-            # On peut retirer ceci si ça ralentit trop le rendu
-            client_map_col, client_info_col = st.columns([0.3, 0.7])
-            
-            with client_map_col:
-                m_client = folium.Map(location=[client['lat'], client['lng']], zoom_start=15, height=150)
-                folium.Marker([client['lat'], client['lng']], icon=folium.Icon(color="blue")).add_to(m_client)
-                folium_static(m_client, width=300)
-
-            with client_info_col:
-                st.markdown(f"""
-                <div class="client-card">
-                    <b>{i+1}. {client['nom']}</b> 
-                    <span style="font-size: 0.8em;">({client_display_type})</span>
-                </div>
-                <div class="address-box">
-                    <p>{client['npa']} {client['ville']}, {client['rue']}</p>
-                    {constraints_html}
-                    <p>Arrivée estimée: {client.get('heure_arrivee_estimee', 'N/A')}</p>
-                    <p>Départ estimé: {client.get('heure_depart_estimee', 'N/A')}</p>
-                </div>
-                """, unsafe_allow_html=True)
-            st.markdown("---")
-
-    st.subheader("🏁 Retour au Dépôt (Optionnel)")
-    st.write("Le temps total affiché n'inclut pas le trajet retour au dépôt. Vous pouvez le calculer si nécessaire.")
-
-    if st.button("✏️ Modifier la tournée"):
+# --- ÉTAPE 1 : VÉHICULE ---
+if st.session_state.step == 1:
+    st.title("🚚 Type de transport")
+    v = st.radio("Sélectionnez votre véhicule :", ["Voiture", "Camion (Lourd)"], index=["Voiture", "Camion (Lourd)"].index(st.session_state.vehicle))
+    if st.button("Valider ➡️"):
+        st.session_state.vehicle = v
         st.session_state.step = 2
         st.rerun()
-    if st.button("🔄 Recommencer"):
-        st.session_state.clients = []
-        st.session_state.depot = None
-        st.session_state.step = 1
-        st.rerun()
 
-# --- AFFICHAGE PRINCIPAL SELON L'ÉTAPE ---
-if st.session_state.step == 1:
-    show_depot_form()
+# --- ÉTAPE 2 : CONFIGURATION DES ARRÊTS ---
 elif st.session_state.step == 2:
-    show_client_form()
+    st.title(f"📍 Configuration de la tournée")
+    
+    col_form, col_map = st.columns([1, 1])
+
+    with col_form:
+        idx = st.session_state.edit_idx
+        is_edit = idx is not None
+        # Détermine si on est en train d'éditer/ajouter le dépôt (index 0) ou un client
+        is_depot = (not is_edit and len(st.session_state.stops) == 0) or (is_edit and idx == 0)
+
+        st.subheader("🏠 Dépôt" if is_depot else "👤 Client")
+        
+        # Champs communs à dépôt et client
+        st.session_state.f_nom = st.text_input("Nom / Enseigne", value=st.session_state.f_nom)
+        c1, c2 = st.columns([1, 3])
+        st.session_state.f_num = c1.text_input("N°", value=st.session_state.f_num)
+        st.session_state.f_rue = c2.text_input("Rue", value=st.session_state.f_rue)
+        c3, c4 = st.columns(2)
+        st.session_state.f_npa = c3.text_input("NPA", value=st.session_state.f_npa)
+        st.session_state.f_vil = c4.text_input("Ville", value=st.session_state.f_vil)
+        
+        # Champs spécifiques au dépôt
+        if is_depot:
+            st.session_state.f_hdep = st.time_input("Heure de départ", value=st.session_state.f_hdep)
+        # Champs spécifiques aux clients
+        else:
+            cc1, cc2 = st.columns(2)
+            st.session_state.f_type = cc1.selectbox("Type de mission", ["Livraison", "Ramasse"], index=["Livraison", "Ramasse"].index(st.session_state.f_type))
+            st.session_state.f_dur = cc2.number_input("Temps estimé sur place (min)", 5, 120, value=st.session_state.f_dur)
+            
+            # Gestion des contraintes horaires
+            st.session_state.f_use_h = st.checkbox("Horaire impératif", value=st.session_state.f_use_h)
+            if st.session_state.f_use_h:
+                ca, cb = st.columns(2)
+                st.session_state.f_t1 = ca.time_input("Pas avant", value=st.session_state.f_t1)
+                st.session_state.f_t2 = cb.time_input("Pas après", value=st.session_state.f_t2)
+            
+            # Nouvelle case pour "Ramasse Cachée"
+            if st.session_state.f_type == "Ramasse":
+                 st.session_state.f_consider_as_delivery = st.checkbox("Considérer comme Livraison (pour le calcul d'itinéraire)", value=st.session_state.f_consider_as_delivery)
+
+        # Bouton pour enregistrer l'arrêt
+        if st.button("✅ Enregistrer", type="primary", use_container_width=True):
+            res_addr = validate_address(st.session_state.f_num, st.session_state.f_rue, st.session_state.f_npa, st.session_state.f_vil)
+            if res_addr:
+                stop_data = {
+                    "nom": st.session_state.f_nom or (f"Client {len(st.session_state.stops)}" if not is_depot else "DÉPÔT"),
+                    **res_addr # Ajoute 'full', 'display', 'lat', 'lng', 'raw'
+                }
+                
+                if is_depot:
+                    stop_data["h_dep"] = st.session_state.f_hdep
+                    stop_data["type"] = "Dépôt" # Ajout du type pour clarté
+                else:
+                    # Ajout des infos client
+                    stop_data.update({
+                        "type": st.session_state.f_type,
+                        "use_h": st.session_state.f_use_h,
+                        "dur": st.session_state.f_dur,
+                        "t1": st.session_state.f_t1,
+                        "t2": st.session_state.f_t2,
+                        "consider_as_delivery": st.session_state.f_consider_as_delivery # Stockage du nouveau champ
+                    })
+                
+                if is_edit:
+                    st.session_state.stops[idx] = stop_data
+                else:
+                    st.session_state.stops.append(stop_data)
+                
+                reset_form_fields() # Réinitialise les champs du formulaire après ajout/modif
+                st.rerun() # Rafraîchit l'UI pour montrer le nouvel arrêt
+            else:
+                st.error("L'adresse fournie n'a pas pu être validée. Veuillez vérifier les informations.")
+
+        # Bouton pour lancer l'optimisation
+        if len(st.session_state.stops) > 1: # On a besoin d'au moins un dépôt et un client
+            st.write("---")
+            st.subheader("🚀 Optimisation")
+            # Votre radio button existant pour choisir l'algorithme
+            algo_options = ["Logique Chauffeur (Aller -> Retour)", "Mathématique (Le plus court)"]
+            current_algo_index = algo_options.index(st.session_state.algo) if st.session_state.algo in algo_options else 0
+            algo = st.radio("Stratégie de tournée :", 
+                           algo_options,
+                           index=current_algo_index,
+                           help="Le mode 'Logique' livre toutes les livraisons à l'aller et fait les ramasses au retour. Cochez 'Considérer comme Livraison' pour les ramasses que vous voulez traiter à l'aller.")
+            
+            if st.button("CALCULER L'ITINÉRAIRE", use_container_width=True, type="primary"):
+                st.session_state.algo = algo # Sauvegarde du choix de l'algo
+                st.session_state.step = 3 # Passe à l'étape suivante pour afficher les résultats
+                st.rerun()
+
+        # Affichage de la liste des arrêts actuels
+        st.subheader("📋 Liste des arrêts")
+        if not st.session_state.stops:
+            st.info("Aucun arrêt configuré pour le moment.")
+        else:
+            for i, s in enumerate(st.session_state.stops):
+                color_class = "depot-box" if i == 0 else "client-box"
+                # Utilisation de vos classes CSS existantes pour l'affichage
+                st.markdown(f'<div class="summary-box {color_class}">', unsafe_allow_html=True)
+                cols = st.columns([0.05, 0.75, 0.1, 0.1]) # Colonnes pour l'icône/numéro, le nom/adresse, edit, delete
+                
+                # Icône/Numéro
+                icon = "🏠" if i == 0 else f"{i}"
+                cols[0].write(icon)
+                
+                # Nom et adresse du client/dépôt
+                type_tag = ""
+                if i > 0: # Uniquement pour les clients
+                    is_delivery = (s['type'] == "Livraison") or s.get('consider_as_delivery', False) # Prend en compte la nouvelle option
+                    type_text = "📦 Liv." if is_delivery else "🔄 Ram."
+                    type_tag = f'<span class="badge">{type_text}</span>'
+                
+                # Affichage de l'adresse et du badge type
+                display_name = s.get("nom", f"Arrêt {i}") # Sécurité si nom manquant
+                cols[1].markdown(f"**{display_name}** | {s['display']} {type_tag}", unsafe_allow_html=True)
+                
+                # Boutons d'édition et de suppression
+                if cols[2].button("✏️", key=f"ed_{i}"):
+                    st.session_state.edit_idx = i
+                    # Remplissage des champs du formulaire avec les données de l'arrêt à éditer
+                    st.session_state.f_nom = s.get('nom', '')
+                    st.session_state.f_num = s['raw']['n']
+                    st.session_state.f_rue = s['raw']['r']
+                    st.session_state.f_npa = s['raw']['npa']
+                    st.session_state.f_vil = s['raw']['v']
+                    if i == 0: # C'est le dépôt
+                        st.session_state.f_hdep = s.get('h_dep', datetime.strptime("08:00", "%H:%M").time())
+                    else: # C'est un client
+                        st.session_state.f_type = s.get('type', 'Livraison')
+                        st.session_state.f_dur = s.get('dur', 15)
+                        st.session_state.f_use_h = s.get('use_h', False)
+                        st.session_state.f_t1 = s.get('t1', datetime.strptime("08:00", "%H:%M").time())
+                        st.session_state.f_t2 = s.get('t2', datetime.strptime("18:00", "%H:%M").time())
+                        st.session_state.f_consider_as_delivery = s.get('consider_as_delivery', False) # Remplissage du nouveau champ
+                    st.rerun() # Rafraîchit pour afficher le formulaire pré-rempli
+                
+                if cols[3].button("🗑️", key=f"dl_{i}"):
+                    st.session_state.stops.pop(i)
+                    st.rerun() # Rafraîchit pour retirer l'arrêt
+                st.markdown('</div>', unsafe_allow_html=True)
+
+    # Carte des arrêts sur la droite
+    with col_map:
+        if st.session_state.stops: # Afficher seulement si il y a des arrêts
+            m = folium.Map(location=[st.session_state.stops[0]['lat'], st.session_state.stops[0]['lng']], zoom_start=10)
+            for i, s in enumerate(st.session_state.stops):
+                # Icône verte pour le dépôt, bleue pour les clients
+                icon_color = "green" if i == 0 else "blue"
+                folium.Marker([s['lat'], s['lng']], tooltip=f"{s.get('nom', 'Arrêt')} ({s['display']})", icon=folium.Icon(color=icon_color, icon='info-sign' if i==0 else 'user')).add_to(m)
+            folium_static(m, width=600)
+        else:
+            st.info("La carte apparaîtra une fois que vous aurez ajouté des arrêts.")
+
+# --- ÉTAPE 3 : RÉSULTATS DE L'OPTIMISATION ---
 elif st.session_state.step == 3:
-    show_optimization_results()
+    st.title("🏁 Itinéraire Optimisé")
+    
+    # Paramètres pour le calcul
+    t_mult = 1.25 if st.session_state.vehicle == "Camion (Lourd)" else 1.0 # Facteur pour les camions
+    depot = st.session_state.stops[0]
+    clients = st.session_state.stops[1:] # Tous les arrêts sauf le dépôt
+
+    if not clients:
+        st.warning("Aucun client ajouté. Impossible de calculer l'itinéraire.")
+        if st.button("⬅️ Revenir à la configuration"):
+            st.session_state.step = 2
+            st.rerun()
+        st.stop() # Arrête l'exécution ici si pas de clients
+
+    ordered_clients = []
+    waypoints_full_address = []
+    
+    # --- LOGIQUE DE TRI SELON L'ALGORITHME CHOISI ---
+    if st.session_state.algo == "Logique Chauffeur (Aller -> Retour)":
+        # Séparation des livraisons et ramasses
+        livraisons_data = [c for c in clients if c['type'] == "Livraison" or c.get('consider_as_delivery', False)]
+        ramasses_data = [c for c in clients if c['type'] == "Ramasse" and not c.get('consider_as_delivery', False)]
+        
+        # Tri des livraisons : du plus proche au plus loin du dépôt (à vol d'oiseau pour la logique)
+        # Ceci est une simplification, Google Maps ne prendra pas forcément ce chemin s'il n'est pas optimal
+        livraisons_data.sort(key=lambda x: ((x['lat']-depot['lat'])**2 + (x['lng']-depot['lng'])**2))
+        # Tri des ramasses : du plus loin au plus proche du dépôt (pour le retour)
+        ramasses_data.sort(key=lambda x: ((x['lat']-depot['lat'])**2 + (x['lng']-depot['lng'])**2), reverse=True)
+        
+        ordered_clients = livraisons_data + ramasses_data
+        waypoints_full_address = [c['full'] for c in ordered_clients]
+        
+        # On demande à Google de calculer le trajet dans cet ordre PRÉCIS (sans ré-optimiser les waypoints eux-mêmes)
+        # optimize_waypoints=False est CRUCIAL ici pour forcer l'ordre défini
+        res = gmaps.directions(depot['full'], depot['full'], waypoints=waypoints_full_address, optimize_waypoints=False)
+
+    else: # Algorithme "Mathématique (Le plus court)"
+        # Utilise la fonction optimize_waypoints=True de Google Maps
+        waypoints_full_address = [c['full'] for c in clients]
+        res = gmaps.directions(depot['full'], depot['full'], waypoints=waypoints_full_address, optimize_waypoints=True)
+        
+        # Google renvoie l'ordre des waypoints dans 'waypoint_order'
+        order_indices = res[0]['waypoint_order']
+        ordered_clients = [clients[i] for i in order_indices]
+
+    # --- AFFICHAGE DES RÉSULTATS ---
+    if res and res[0]['legs']:
+        legs = res[0]['legs']
+        
+        # Initialisation du temps de départ
+        current_time = datetime.combine(datetime.today(), depot['h_dep'])
+        
+        # Création de la carte
+        m_final = folium.Map(location=[depot['lat'], depot['lng']], zoom_start=10)
+        
+        # Affichage du départ du dépôt
+        depot_info = f"**DÉPART DU DÉPÔT : {current_time.strftime('%H:%M')}**"
+        st.markdown(f'<div class="info-box">{depot_info}</div>', unsafe_allow_html=True)
+        folium.Marker([depot['lat'], depot['lng']], tooltip="Dépôt", icon=folium.Icon(color="green", icon='home')).add_to(m_final)
+
+        total_distance = 0
+        total_duration_minutes = 0
+        total_service_time = 0
+        total_wait_time = 0
+        
+        # Itération sur chaque étape (trajet + service client)
+        for i, leg in enumerate(legs): # Note: legs inclut le trajet vers le DERNIER waypoint ET le retour vers le dépôt. On ne prendra que les N premiers legs.
+            
+            client = ordered_clients[i] # Le client correspondant à ce leg
+            
+            # Durée du trajet (ajustée pour véhicule lourd)
+            duration_sec = leg['duration']['value']
+            distance_text = leg['distance']['text']
+            
+            # Calcul du temps de trajet effectif en tenant compte du type de véhicule
+            adjusted_duration_mins = int((duration_sec / 60) * t_mult)
+            
+            # Calcul du temps d'arrivée au client
+            arrival_time_at_client = current_time + timedelta(minutes=adjusted_duration_mins)
+            
+            # Gestion des contraintes horaires et du temps d'attente
+            wait_time_mins = 0
+            if client.get('use_h', False):
+                start_constraint = datetime.combine(datetime.today(), client['t1'])
+                end_constraint = datetime.combine(datetime.today(), client['t2'])
+                
+                if arrival_time_at_client < start_constraint:
+                    wait_time_mins = (start_constraint - arrival_time_at_client).total_seconds() / 60
+                    arrival_time_at_client = start_constraint # Le chauffeur attend
+                elif arrival_time_at_client > end_constraint:
+                    # Le chauffeur est en retard sur sa fenêtre horaire, on affiche l'heure réelle d'arrivée
+                    # Pas d'attente à ajouter, mais on peut afficher un message d'alerte plus tard
+                    pass 
+            
+            # Durée de service réelle (temps passé sur place + attente éventuelle)
+            service_time_mins = wait_time_mins + client.get('dur', 15) # Utilise 'dur' ou la valeur par défaut
+
+            # Mise à jour du temps courant pour le prochain départ
+            current_time = arrival_time_at_client + timedelta(minutes=service_time_mins)
+
+            # Affichage des détails de l'étape courante
+            type_icon = "📦" if (client['type'] == "Livraison" or client.get('consider_as_delivery', False)) else "🔄"
+            display_name = client.get("nom", f"Arrêt {i+1}")
+
+            # Informations à afficher dans la bulle d'information
+            info_text = f"**{i+1}. {type_icon} {display_name}**<br>"
+            info_text += f"⌚ Arrivée prévue : **{arrival_time_at_client.strftime('%H:%M:%S')}**<br>"
+            if wait_time_mins > 0:
+                info_text += f"⏳ Attente : **{wait_time_mins:.0f} min**<br>"
+            info_text += f"⏰ Temps sur place : **{client.get('dur', 15)} min** ({'Attente incluse' if wait_time_mins > 0 else 'Pas d\'attente'})<br>"
+            if client.get('use_h', False):
+                info_text += f"🕦 Fenêtre horaire : **{client['t1'].strftime('%H:%M')} - {client['t2'].strftime('%H:%M')}**"
+            
+            # Utilisation de vos classes pour l'affichage
+            st.markdown(f'<div class="client-card"><h3 style="margin:0; color: white;">{display_name} {type_icon}</h3><p style="margin: 5px 0; opacity: 0.9;">{info_text}</p></div>', unsafe_allow_html=True)
+            st.markdown('<div class="address-box">', unsafe_allow_html=True)
+            st.code(client['full'], language=None)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            # Ajout du marqueur sur la carte
+            folium.Marker([client['lat'], client['lng']], popup=display_name, icon=folium.Icon(color="blue", icon='info-sign')).add_to(m_final)
+            
+            # Ajout de la ligne de trajet sur la carte (pour le trajet précédent)
+            if i > 0: # On ajoute la ligne depuis l'arrêt précédent
+                prev_client = ordered_clients[i-1]
+                # La ligne doit aller de prev_client à client. Google nous donne les points.
+                # Pour simplifier, on utilise les points de la géométrie du leg précédent.
+                if i-1 < len(legs): # On vérifie si on a bien un leg précédent
+                    route_segment = legs[i-1]['geometry']['coordinates']
+                    # On doit décoder les points pour folium si nécessaire, mais souvent c'est déjà une liste de [lng, lat]
+                    # Assurons-nous que c'est bien du [lat, lng] pour folium
+                    decoded_points = [(p[1], p[0]) for p in route_segment] # Inversion lat/lng et formatage
+                    folium.PolyLine(decoded_points, color="blue", weight=5, opacity=0.7).add_to(m_final)
+
+            # Cumul des totaux
+            total_distance += leg['distance']['value']
+            total_duration_minutes += adjusted_duration_mins
+            total_service_time += service_time_mins
+            total_wait_time += wait_time_mins
+
+        # Ajout du dernier segment (retour au dépôt)
+        if len(legs) > len(ordered_clients): # S'il y a bien un leg de retour final
+            final_leg = legs[-1] # Le dernier leg est le retour au dépôt
+            total_distance += final_leg['distance']['value']
+            total_duration_minutes += int((final_leg['duration']['value'] / 60) * t_mult)
+            # Affichage résumé final
+            st.markdown("---")
+            st.subheader("📊 Résumé de la tournée")
+            st.markdown(f'<div class="info-box"><strong>Distance totale :</strong> {total_distance/1000:.1f} km</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-box"><strong>Durée des trajets :</strong> {total_duration_minutes:.0f} min (estimé véhicule {st.session_state.vehicle})</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-box"><strong>Temps total sur place (avec attentes) :</strong> {total_service_time:.0f} min</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-box"><strong>Temps d\'attente total :</strong> {total_wait_time:.0f} min</div>', unsafe_allow_html=True)
+            
+            final_departure_from_depot = datetime.combine(datetime.today(), depot['h_dep'])
+            total_time_spent = total_service_time + total_duration_minutes
+            st.markdown(f'<div class="info-box"><strong>Heure de retour estimée au dépôt :</strong> <b>{ (final_departure_from_depot + timedelta(minutes=total_time_spent)).strftime("%H:%M:%S") }</b></div>', unsafe_allow_html=True)
+
+            # Affichage de la carte avec tout l'itinéraire
+            # Il faut reconstruire la polyligne globale à partir des points des legs
+            all_points = []
+            for i, leg in enumerate(legs):
+                # On ajoute les points du trajet
+                segment_points = leg['geometry']['coordinates']
+                # Assurez-vous que les points sont dans le bon format [lat, lng] pour folium
+                formatted_segment = [(p[1], p[0]) for p in segment_points]
+                all_points.extend(formatted_segment)
+
+            if all_points:
+                folium.PolyLine(all_points, color="blue", weight=5, opacity=0.7).add_to(m_final)
+            
+            st.markdown("---")
+            st.subheader("📍 Carte de l'itinéraire")
+            folium_static(m_final, width=1000)
+
+        else: # Cas où il n'y a pas eu de retour au dépôt calculé (trop peu d'arrêts ?)
+            st.warning("Impossible de calculer le trajet de retour au dépôt.")
+
+        # Bouton pour revenir à la configuration
+        if st.button("⬅️ Modifier la tournée"):
+            st.session_state.step = 2
+            st.rerun()
+            
+    else:
+        st.error("Impossible de calculer l'itinéraire. Veuillez vérifier les adresses et votre clé API.")
+        if st.button("⬅️ Revenir à la configuration"):
+            st.session_state.step = 2
+            st.rerun()
