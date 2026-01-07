@@ -3,3 +3,4 @@ streamlit
 streamlit-folium
 folium
 polyline
+geopy
