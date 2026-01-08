@@ -4,3 +4,5 @@ streamlit-folium
 folium
 polyline
 geopy
+pandas
+plotly
