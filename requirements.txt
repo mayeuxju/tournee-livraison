@@ -6,3 +6,4 @@ polyline
 geopy
 pandas
 plotly
+numpy
